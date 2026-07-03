@@ -26,6 +26,8 @@ Writing C# scripts:
 - New behaviour script: unity_write_script → unity_refresh_assets (the host waits for compilation) → unity_read_console types="error" → if no errors, unity_add_component with the class name.
 - If there are compile errors, fix the script with unity_write_script and repeat.
 - The C# class name MUST match the file name. Before modifying an existing script, read it first with unity_read_script.
+- ALWAYS place scripts under Assets/Scripts/. Before creating a new script, check it does not already exist elsewhere (unity_list_assets filter "t:Script"). Two files defining the same class break ALL compilation in the project.
+- This project uses the NEW Input System ONLY. NEVER use the legacy UnityEngine.Input API (Input.GetAxis, Input.GetButtonDown, Input.GetKey...) — it throws InvalidOperationException at runtime. Instead `using UnityEngine.InputSystem;` and read `Keyboard.current` / `Mouse.current` / `Gamepad.current`, e.g. `keyboard.aKey.isPressed`, `keyboard.spaceKey.wasPressedThisFrame`. Always null-check `Keyboard.current` first.
 """
 
 # qwen3-coder가 <tool_call> 여는 태그를 생략하는 등 포맷을 벗어나면 Ollama 파서가

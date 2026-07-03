@@ -186,30 +186,31 @@ class UnityTools:
         if config.FOCUS_UNITY_ON_COMPILE:
             import winfocus
             prev_focus = winfocus.focus_unity()
-        try:
-            await asyncio.sleep(1.5)  # 컴파일은 refresh 반환 직후에 시작될 수 있다
-            for _ in range(45):  # 최대 ~90초 (첫 스크립트 임포트 + 도메인 리로드는 오래 걸린다)
-                state = await self._call_once("unity_get_state", {})
-                try:
-                    r = json.loads(state)["result"]
-                except (json.JSONDecodeError, KeyError, TypeError):
-                    # 도메인 리로드로 브리지 다운 — 포트가 바뀌었으면 재접속 후 계속 대기
-                    await self._reconnect_if_port_changed()
-                    await asyncio.sleep(2)
-                    continue
-                if not r.get("isCompiling") and not r.get("isUpdating"):
-                    return refresh_text + (
-                        "\n[호스트가 컴파일 완료까지 대기했습니다. "
-                        'unity_read_console types="error"로 컴파일 에러를 확인하세요.]'
-                    )
+        await asyncio.sleep(1.5)  # 컴파일은 refresh 반환 직후에 시작될 수 있다
+        for _ in range(45):  # 최대 ~90초 (첫 스크립트 임포트 + 도메인 리로드는 오래 걸린다)
+            state = await self._call_once("unity_get_state", {})
+            try:
+                r = json.loads(state)["result"]
+            except (json.JSONDecodeError, KeyError, TypeError):
+                # 도메인 리로드로 브리지 다운 — 포트가 바뀌었으면 재접속 후 계속 대기
+                await self._reconnect_if_port_changed()
                 await asyncio.sleep(2)
-            return refresh_text + (
-                "\n[90초가 지나도 아직 컴파일 중입니다. unity_get_state로 상태를 확인하세요.]"
-            )
-        finally:
-            if prev_focus:
-                import winfocus
-                winfocus.restore_focus(prev_focus)
+                continue
+            if not r.get("isCompiling") and not r.get("isUpdating"):
+                # 완료했을 때만 포커스를 되돌린다 — 타임아웃 시 되돌리면 백그라운드의
+                # Unity가 리로드를 마저 끝내지 못한다
+                if prev_focus:
+                    import winfocus
+                    winfocus.restore_focus(prev_focus)
+                return refresh_text + (
+                    "\n[호스트가 컴파일 완료까지 대기했습니다. "
+                    'unity_read_console types="error"로 컴파일 에러를 확인하세요.]'
+                )
+            await asyncio.sleep(2)
+        return refresh_text + (
+            "\n[90초가 지나도 아직 컴파일 중입니다. Unity 에디터에 확인 대화상자가 떠 있지 "
+            "않은지 확인하세요. unity_get_state로 상태를 이어서 확인할 수 있습니다.]"
+        )
 
     def _coerce_args(self, name: str, args: dict) -> dict:
         """스키마상 array/number/bool 인자가 문자열로 오면 json.loads로 보정."""
