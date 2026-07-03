@@ -1,0 +1,11 @@
+[project]
+name = "unity-local-agent"
+version = "0.1.0"
+description = "로컬 LLM(Ollama)으로 Unity Editor를 제어하는 에이전트 CLI"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.2.0",
+    "ollama>=0.4",
+    "rich>=13.0",
+    "prompt_toolkit>=3.0",
+]
