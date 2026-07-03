@@ -22,5 +22,14 @@ UNITY_MCP_DIR = os.environ.get(
     "UNITY_MCP_DIR", r"C:\Users\park\Desktop\dev_tool\unity_mcp"
 )
 
+# Unity 프로젝트 경로 (스크립트 쓰기 + 브리지 포트 파일 읽기용).
+# 비우면 스크립트 쓰기는 unity_ping의 projectPath로 자동 발견하지만,
+# 포트 파일은 연결 전에 필요하므로 지정해두는 것을 권장.
+UNITY_PROJECT_DIR = os.environ.get("UNITY_PROJECT_DIR", r"C:\Users\park\My project")
+
 # 스크린샷 PNG를 자동으로 열지 여부
 AUTO_OPEN_SCREENSHOT = os.environ.get("UNITY_AGENT_AUTO_OPEN", "1") != "0"
+
+# 컴파일 대기 시 Unity 창에 잠깐 포커스를 줄지 여부.
+# Unity는 백그라운드에 있으면 스크립트 컴파일을 미루므로 기본 켬.
+FOCUS_UNITY_ON_COMPILE = os.environ.get("UNITY_AGENT_FOCUS_COMPILE", "1") != "0"

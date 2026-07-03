@@ -21,6 +21,11 @@ Rules:
 - Never fabricate tool results. If the Unity bridge is unreachable, say so and tell the user to check the Unity Editor.
 - unity_screenshot saves a PNG and returns its path. You cannot see images — report the path to the user and ask them to look at it.
 - Prefer few, targeted tool calls. Do not dump the full hierarchy unless the user asks for it.
+
+Writing C# scripts:
+- New behaviour script: unity_write_script → unity_refresh_assets (the host waits for compilation) → unity_read_console types="error" → if no errors, unity_add_component with the class name.
+- If there are compile errors, fix the script with unity_write_script and repeat.
+- The C# class name MUST match the file name. Before modifying an existing script, read it first with unity_read_script.
 """
 
 # qwen3-coder가 <tool_call> 여는 태그를 생략하는 등 포맷을 벗어나면 Ollama 파서가

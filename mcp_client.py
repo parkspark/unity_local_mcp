@@ -14,6 +14,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 import config
+import local_tools
 
 
 def _find_uv() -> str:
@@ -30,17 +31,39 @@ def _find_uv() -> str:
     raise RuntimeError("uv.exe를 찾을 수 없습니다. https://docs.astral.sh/uv/ 참고")
 
 
+def _bridge_port() -> str | None:
+    """브리지가 Library/McpBridgePort.txt에 기록한 실제 포트.
+
+    도메인 리로드로 고아가 된 소켓이 8722를 점유하면 브리지는 다음 포트로
+    옮겨 바인드하므로, 파일이 있으면 그 포트를 서버에 넘겨야 한다.
+    """
+    if not config.UNITY_PROJECT_DIR:
+        return None
+    path = os.path.join(config.UNITY_PROJECT_DIR, "Library", "McpBridgePort.txt")
+    try:
+        with open(path, encoding="utf-8") as f:
+            port = f.read().strip()
+        return port if port.isdigit() else None
+    except OSError:
+        return None
+
+
 def _server_params() -> StdioServerParameters:
     """MCP 서버 실행 방법. venv python을 직접 쓰면 uv 중간 계층이 없어
     종료 시 자식 프로세스가 고아로 남지 않는다. venv가 없으면 uv로 폴백."""
+    env = None
+    port = _bridge_port()
+    if port and "UNITY_MCP_PORT" not in os.environ:
+        env = {**os.environ, "UNITY_MCP_PORT": port}
     venv_python = os.path.join(config.UNITY_MCP_DIR, ".venv", "Scripts", "python.exe")
     if os.path.exists(venv_python):
         return StdioServerParameters(
-            command=venv_python, args=["server.py"], cwd=config.UNITY_MCP_DIR
+            command=venv_python, args=["server.py"], cwd=config.UNITY_MCP_DIR, env=env
         )
     return StdioServerParameters(
         command=_find_uv(),
         args=["--directory", config.UNITY_MCP_DIR, "run", "server.py"],
+        env=env,
     )
 
 
@@ -97,6 +120,7 @@ class UnityTools:
 
     async def __aenter__(self):
         self._stack = AsyncExitStack()
+        self._port = _bridge_port() or "8722"  # 서버 프로세스에 넘겨준 포트
         params = _server_params()
         # 서버 stderr("Processing request..." 로그)가 채팅 화면에 섞이지 않게 파일로
         errlog = self._stack.enter_context(
@@ -106,17 +130,86 @@ class UnityTools:
         self.session = await self._stack.enter_async_context(ClientSession(read, write))
         await self.session.initialize()
         self.tools = (await self.session.list_tools()).tools
-        self.ollama_tools = [_to_ollama(t) for t in self.tools]
+        self.ollama_tools = [_to_ollama(t) for t in self.tools] + local_tools.SCHEMAS
         self._schemas = {t.name: t.inputSchema for t in self.tools}
+        self._project_dir: str | None = config.UNITY_PROJECT_DIR or None
         self.last_raw_result = ""  # /last 명령용, 절단 전 원본
         return self
 
     async def __aexit__(self, *exc):
         await self._stack.aclose()
 
+    async def _reconnect_if_port_changed(self) -> bool:
+        """브리지가 도메인 리로드로 다른 포트에 바인드했으면 서버를 새 포트로 재기동.
+
+        server.py는 시작 시 UNITY_MCP_PORT를 한 번만 읽으므로, 포트가 바뀌면
+        stdio 서버 자체를 다시 띄워야 한다. (진입한 것과 같은 태스크에서만 호출할 것)
+        """
+        new_port = _bridge_port()
+        if not new_port or new_port == self._port:
+            return False
+        await self._stack.aclose()
+        await self.__aenter__()
+        return True
+
     @property
     def names(self) -> list[str]:
-        return [t.name for t in self.tools]
+        return [t["function"]["name"] for t in self.ollama_tools]
+
+    async def _resolve_project_dir(self) -> str | None:
+        """Unity 프로젝트 경로. 최초 사용 시 unity_ping의 projectPath에서 발견해 캐시."""
+        if self._project_dir:
+            return self._project_dir
+        text = await self._call_once("unity_ping", {})
+        try:
+            path = json.loads(text)["result"]["projectPath"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return None
+        if path and os.path.isdir(path):
+            self._project_dir = path
+            return path
+        return None
+
+    async def _wait_for_compile(self, refresh_text: str) -> str:
+        """refresh_assets 성공 후 컴파일이 끝날 때까지 호스트가 대기.
+
+        30B 모델에게 타이밍 재시도를 맡기면 실패한다 — 결정적으로 처리한다.
+        Unity는 백그라운드에 있으면 컴파일을 미루므로 잠깐 포커스를 줬다가 되돌린다.
+        """
+        try:
+            if json.loads(refresh_text).get("status") != "ok":
+                return refresh_text
+        except (json.JSONDecodeError, TypeError):
+            return refresh_text
+
+        prev_focus = 0
+        if config.FOCUS_UNITY_ON_COMPILE:
+            import winfocus
+            prev_focus = winfocus.focus_unity()
+        try:
+            await asyncio.sleep(1.5)  # 컴파일은 refresh 반환 직후에 시작될 수 있다
+            for _ in range(45):  # 최대 ~90초 (첫 스크립트 임포트 + 도메인 리로드는 오래 걸린다)
+                state = await self._call_once("unity_get_state", {})
+                try:
+                    r = json.loads(state)["result"]
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    # 도메인 리로드로 브리지 다운 — 포트가 바뀌었으면 재접속 후 계속 대기
+                    await self._reconnect_if_port_changed()
+                    await asyncio.sleep(2)
+                    continue
+                if not r.get("isCompiling") and not r.get("isUpdating"):
+                    return refresh_text + (
+                        "\n[호스트가 컴파일 완료까지 대기했습니다. "
+                        'unity_read_console types="error"로 컴파일 에러를 확인하세요.]'
+                    )
+                await asyncio.sleep(2)
+            return refresh_text + (
+                "\n[90초가 지나도 아직 컴파일 중입니다. unity_get_state로 상태를 확인하세요.]"
+            )
+        finally:
+            if prev_focus:
+                import winfocus
+                winfocus.restore_focus(prev_focus)
 
     def _coerce_args(self, name: str, args: dict) -> dict:
         """스키마상 array/number/bool 인자가 문자열로 오면 json.loads로 보정."""
@@ -145,10 +238,25 @@ class UnityTools:
         return text
 
     async def call(self, name: str, args: dict) -> str:
+        if name in local_tools.NAMES:
+            project_dir = await self._resolve_project_dir()
+            if project_dir is None:
+                text = json.dumps({
+                    "status": "error",
+                    "error": (
+                        "Unity 프로젝트 경로를 알 수 없습니다. Unity Editor가 열려 있는지 "
+                        "확인하거나 UNITY_PROJECT_DIR 환경변수를 설정하세요."
+                    ),
+                }, ensure_ascii=False)
+            else:
+                text = local_tools.call(name, args, project_dir)
+            self.last_raw_result = text
+            return _truncate(text)
+
         if name not in self._schemas:
             return (
                 f"Error: unknown tool '{name}'. "
-                f"Available: {', '.join(sorted(self._schemas))}"
+                f"Available: {', '.join(sorted(self.names))}"
             )
         args = self._coerce_args(name, args)
         text = await self._call_once(name, args)
@@ -159,7 +267,12 @@ class UnityTools:
             "Empty response from Unity bridge" in text and name in _READONLY
         )
         if retryable:
-            await asyncio.sleep(4)
+            # 리로드로 브리지가 다른 포트로 옮겨갔을 수 있다
+            if not await self._reconnect_if_port_changed():
+                await asyncio.sleep(4)
+                await self._reconnect_if_port_changed()
             text = await self._call_once(name, args)
+        if name == "unity_refresh_assets":
+            text = await self._wait_for_compile(text)
         self.last_raw_result = text
         return _truncate(text)

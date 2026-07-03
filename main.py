@@ -104,7 +104,7 @@ async def main():
     async with UnityTools() as ut:
         agent = Agent(ut, cli.on_text, cli.on_tool, cli.on_warn)
         console.print(
-            f"[bold]연결됨:[/bold] {len(ut.tools)} tools · {agent.model} · ctx {config.NUM_CTX}"
+            f"[bold]연결됨:[/bold] {len(ut.ollama_tools)} tools · {agent.model} · ctx {config.NUM_CTX}"
         )
 
         ping = await ut.call("unity_ping", {})
@@ -152,9 +152,10 @@ async def main():
                     agent.reset()
                     console.print("[dim]대화를 초기화했습니다.[/dim]")
                 elif cmd == "/tools":
-                    for t in ut.tools:
-                        desc = (t.description or "").split("\n")[0]
-                        console.print(f"  [cyan]{t.name}[/cyan] [dim]{escape(desc)}[/dim]")
+                    for t in ut.ollama_tools:
+                        fn = t["function"]
+                        desc = (fn["description"] or "").split("\n")[0].split(". ")[0]
+                        console.print(f"  [cyan]{fn['name']}[/cyan] [dim]{escape(desc)}[/dim]")
                 elif cmd == "/model":
                     if rest:
                         agent.model = rest.strip()
