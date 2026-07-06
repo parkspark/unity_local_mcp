@@ -1,5 +1,6 @@
 """Ollama tool-call 에이전트 루프."""
 
+import json
 import re
 
 import ollama
@@ -17,6 +18,8 @@ Rules:
 - Verify after acting: after create/modify/delete, confirm the result with unity_get_gameobject or unity_get_hierarchy. After entering play mode, check unity_read_console for errors.
 - `target` arguments are hierarchy paths like "Parent/Child". Use exact paths you saw in the hierarchy. Never guess names.
 - position/rotation/scale are JSON arrays of 3 numbers, e.g. [0, 1.5, 0]. rotation is euler degrees.
+- Tool arguments are STRICT JSON. Numbers never carry C# suffixes: write 0.9, NOT 0.9f. Vectors are real JSON arrays like [0.9, 0.9, 0.9], never the string "[0.9f, 0.9f, 0.9f]".
+- NEVER create similar objects one-by-one with repeated unity_create_gameobject calls. For 3+ similar objects call unity_create_gameobjects ONCE with a list of specs. For large or procedural layouts (grids, boards, 20+ objects — e.g. a 10x20 board) do not create them with tools at all: write a MonoBehaviour that builds them in Awake()/Start() with GameObject.CreatePrimitive or Instantiate in a loop, attach it to one empty GameObject, and let the game generate the layout itself.
 - After unity_play_mode or unity_refresh_assets, Unity reloads its domain: if the NEXT call fails with a connection error, retry it once before reporting failure.
 - Never fabricate tool results. If the Unity bridge is unreachable, say so and tell the user to check the Unity Editor.
 - unity_screenshot saves a PNG and returns its path. You cannot see images — report the path to the user and ask them to look at it.
@@ -27,6 +30,7 @@ Writing C# scripts:
 - If there are compile errors, fix the script with unity_write_script and repeat.
 - The C# class name MUST match the file name. Before modifying an existing script, read it first with unity_read_script.
 - ALWAYS place scripts under Assets/Scripts/. Before creating a new script, check it does not already exist elsewhere (unity_list_assets filter "t:Script"). Two files defining the same class break ALL compilation in the project.
+- To remove a stale, duplicate, or conflicting script that breaks compilation, DELETE it with unity_delete_script (do NOT just leave it or try to work around it), then unity_refresh_assets to recompile.
 - This project uses the NEW Input System ONLY. NEVER use the legacy UnityEngine.Input API (Input.GetAxis, Input.GetButtonDown, Input.GetKey...) — it throws InvalidOperationException at runtime. Instead `using UnityEngine.InputSystem;` and read `Keyboard.current` / `Mouse.current` / `Gamepad.current`, e.g. `keyboard.aKey.isPressed`, `keyboard.spaceKey.wasPressedThisFrame`. Always null-check `Keyboard.current` first.
 - Unity 6 renamed APIs — obsolete names trigger a blocking editor dialog. Use `rb.linearVelocity` (NOT `rb.velocity`) and `Object.FindFirstObjectByType<T>()` (NOT `FindObjectOfType<T>()`).
 """
@@ -47,6 +51,36 @@ def _salvage_tool_calls(content: str) -> list[tuple[str, dict]]:
         args = {k: v for k, v in _PARAM.findall(m.group(2))}
         calls.append((name, args))
     return calls
+
+
+def _call_key(name: str, args: dict) -> tuple[str, str]:
+    return name, json.dumps(args, sort_keys=True, ensure_ascii=False)
+
+
+def _merge_leaked_calls(content, calls, had_leak):
+    """정상 파싱된 tool-call에 텍스트로 샌 것을 병합.
+
+    qwen3-coder가 한 응답에서 일부는 정상 tool-call로, 일부는 <function=...> 텍스트로
+    흘리는 '혼합 응답'을 처리한다. 기존엔 정상 호출이 하나라도 있으면 누수분을 통째로
+    버렸다. 누수분을 앞쪽에 두는 이유: 모델은 보통 주 동작(예: 삭제)을 먼저 서술하고
+    후속(예: refresh)을 정상 호출로 낸다. 중복은 이름+인자로 제거한다.
+
+    반환: (마크업 제거된 content, 병합된 calls, 복구 건수).
+    """
+    if not had_leak:
+        return content, calls, 0
+    salvaged = _salvage_tool_calls(content)
+    if not salvaged:
+        return content, calls, 0
+    cleaned = _MARKUP.sub("", content).strip()
+    seen = {_call_key(n, a) for n, a in calls}
+    new = []
+    for n, a in salvaged:
+        key = _call_key(n, a)
+        if key not in seen:
+            new.append((n, a))
+            seen.add(key)
+    return cleaned, new + calls, len(new)
 
 
 class Agent:
@@ -108,23 +142,24 @@ class Agent:
 
         calls = [(tc.function.name, dict(tc.function.arguments or {})) for tc in tool_calls]
 
-        if not calls and _LEAKED_TOOLCALL.search(content):
-            calls = _salvage_tool_calls(content)
-            if calls:
-                # 다음 턴에 모델이 자기 누수 텍스트를 따라하지 않게 히스토리에선 제거
-                content = _MARKUP.sub("", content).strip()
-                self.on_warn(f"텍스트로 샌 tool-call {len(calls)}건을 복구해 실행합니다.")
-            else:
-                self.on_warn(
-                    "tool-call이 텍스트로 새어 나왔지만 복구하지 못했습니다. "
-                    "Ollama 업데이트 또는 /reset을 시도하세요."
-                )
+        had_leak = bool(_LEAKED_TOOLCALL.search(content))
+        # 다음 턴에 모델이 자기 누수 텍스트를 따라하지 않게 히스토리에선 마크업 제거
+        content, calls, recovered = _merge_leaked_calls(content, calls, had_leak)
+        if recovered:
+            self.on_warn(f"텍스트로 샌 tool-call {recovered}건을 복구해 실행합니다.")
+        elif had_leak and not calls:
+            self.on_warn(
+                "tool-call이 텍스트로 새어 나왔지만 복구하지 못했습니다. "
+                "Ollama 업데이트 또는 /reset을 시도하세요."
+            )
         return content, calls
 
     async def run_turn(self, user_text: str):
         self.history.append({"role": "user", "content": user_text})
         self._trim_history()
 
+        call_counts: dict[str, int] = {}
+        nudged = False
         for _ in range(config.MAX_ITERS):
             content, calls = await self._chat()
             self.history.append(
@@ -145,6 +180,22 @@ class Agent:
                 self.history.append(
                     {"role": "tool", "tool_name": name, "content": result}
                 )
+
+            # 같은 툴 반복 호출 감지: 개별 호출을 쌓는 대신 배치/스크립트로 유도
+            if config.LOOP_GUARD_THRESHOLD and not nudged:
+                for name, _a in calls:
+                    call_counts[name] = call_counts.get(name, 0) + 1
+                    if call_counts[name] >= config.LOOP_GUARD_THRESHOLD:
+                        self.history.append({"role": "user", "content": (
+                            "[시스템] 같은 툴을 반복 호출하고 있습니다. 반복적인 오브젝트 생성은 "
+                            "unity_create_gameobjects 배치 툴 하나로 처리하거나, 큰 그리드는 "
+                            "스크립트의 Awake()/Start()에서 생성하세요."
+                        )})
+                        self.on_warn(
+                            f"{name} 반복 호출 감지 — 배치 툴/스크립트 사용을 권고했습니다."
+                        )
+                        nudged = True
+                        break
 
         # 반복 한도 도달: 툴 없이 요약만 받는다
         self.history.append(

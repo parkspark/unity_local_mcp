@@ -14,6 +14,8 @@ STREAM = os.environ.get("UNITY_AGENT_STREAM", "1") != "0"
 # 에이전트 루프
 MAX_ITERS = int(os.environ.get("UNITY_AGENT_MAX_ITERS", "15"))
 TRUNCATE_CHARS = int(os.environ.get("UNITY_AGENT_TRUNCATE_CHARS", "8000"))
+# 한 턴에서 같은 툴이 이 횟수만큼 호출되면 배치/스크립트 사용을 권고. 0이면 끔.
+LOOP_GUARD_THRESHOLD = int(os.environ.get("UNITY_AGENT_LOOP_GUARD", "4"))
 # 히스토리 트리밍 기준: 추정 토큰이 num_ctx의 이 비율을 넘으면 오래된 대화 삭제
 HISTORY_BUDGET_RATIO = 0.7
 

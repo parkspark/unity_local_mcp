@@ -7,6 +7,7 @@
 import asyncio
 import json
 import os
+import re
 import shutil
 from contextlib import AsyncExitStack
 
@@ -15,6 +16,14 @@ from mcp.client.stdio import stdio_client
 
 import config
 import local_tools
+
+
+_CS_FLOAT_SUFFIX = re.compile(r"(?<=[\d.])[fF]\b")
+
+
+def _lenient_json(text: str):
+    """C#풍 float 접미사('0.9f')를 허용해 JSON으로 파싱. 실패 시 예외 전파."""
+    return json.loads(_CS_FLOAT_SUFFIX.sub("", text))
 
 
 def _find_uv() -> str:
@@ -231,7 +240,7 @@ class UnityTools:
             schema_type = props.get(key, {}).get("type")
             if isinstance(value, str) and schema_type in ("array", "number", "integer", "boolean"):
                 try:
-                    value = json.loads(value)
+                    value = _lenient_json(value)
                 except (json.JSONDecodeError, TypeError):
                     pass
             fixed[key] = value

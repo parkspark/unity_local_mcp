@@ -8,7 +8,10 @@ import json
 import os
 import re
 
-NAMES = {"unity_write_script", "unity_read_script"}
+NAMES = {"unity_write_script", "unity_read_script", "unity_delete_script"}
+
+# 브리지 자기 자신은 삭제 금지 — 제어 채널이 끊긴다.
+_PROTECTED_PREFIX = "Assets/Editor/McpBridge/"
 
 # Unity 6에서 개명된 구식 API. 그대로 두면 API Updater가 에디터를 막는
 # "Script Updating Consent" 모달을 띄우므로 쓰기 전에 교정한다.
@@ -71,6 +74,28 @@ SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "unity_delete_script",
+            "description": (
+                "Delete a C# script file from the Unity project (removes the .cs and its .meta). "
+                "Use this to remove a stale, duplicate, or conflicting script that breaks compilation "
+                "(e.g. two files defining the same class). "
+                "After deleting, call unity_refresh_assets to recompile."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Project-relative path starting with Assets/, ending with .cs, e.g. \"Assets/Scripts/TetrominoBlock.cs\"",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
 ]
 
 
@@ -123,5 +148,28 @@ def call(name: str, args: dict, project_dir: str) -> str:
             return _error(f"file not found: {abs_path}")
         with open(abs_path, "r", encoding="utf-8") as f:
             return f.read()
+
+    if name == "unity_delete_script":
+        norm = str(args.get("path", "")).replace("\\", "/").strip().lstrip("/")
+        if norm.startswith(_PROTECTED_PREFIX):
+            return _error(
+                f"refusing to delete the MCP bridge itself ({norm}) — it is the control channel"
+            )
+        if not os.path.exists(abs_path):
+            return _error(f"file not found: {abs_path}")
+        os.remove(abs_path)
+        meta_path = abs_path + ".meta"
+        meta_deleted = False
+        if os.path.exists(meta_path):
+            os.remove(meta_path)
+            meta_deleted = True
+        return json.dumps({
+            "status": "ok",
+            "result": {
+                "deleted": abs_path,
+                "meta_deleted": meta_deleted,
+                "next_step": "call unity_refresh_assets to recompile",
+            },
+        }, ensure_ascii=False)
 
     return _error(f"unknown local tool: {name}")
