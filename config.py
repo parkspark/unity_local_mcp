@@ -33,3 +33,7 @@ AUTO_OPEN_SCREENSHOT = os.environ.get("UNITY_AGENT_AUTO_OPEN", "1") != "0"
 # 컴파일 대기 시 Unity 창에 잠깐 포커스를 줄지 여부.
 # Unity는 백그라운드에 있으면 스크립트 컴파일을 미루므로 기본 켬.
 FOCUS_UNITY_ON_COMPILE = os.environ.get("UNITY_AGENT_FOCUS_COMPILE", "1") != "0"
+
+# "Script Updating Consent" 모달(구식 API 자동 변환 동의)을 자동으로 수락할지.
+# 모달이 뜨면 에디터 메인 스레드가 멈춰 브리지가 마비되므로 기본 켬.
+AUTO_CONSENT = os.environ.get("UNITY_AGENT_AUTO_CONSENT", "1") != "0"

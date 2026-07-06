@@ -6,8 +6,25 @@ Unity 프로젝트의 Assets/ 아래 C# 스크립트를 읽고 쓴다.
 
 import json
 import os
+import re
 
 NAMES = {"unity_write_script", "unity_read_script"}
+
+# Unity 6에서 개명된 구식 API. 그대로 두면 API Updater가 에디터를 막는
+# "Script Updating Consent" 모달을 띄우므로 쓰기 전에 교정한다.
+# 오탐을 피하기 위해 가장 흔하고 모호하지 않은 패턴만 다룬다.
+_OBSOLETE_FIXES = [
+    (re.compile(r"\.velocity\b"), ".linearVelocity", "velocity→linearVelocity"),
+]
+
+
+def _sanitize(content: str) -> tuple[str, list[str]]:
+    fixed = []
+    for pattern, replacement, label in _OBSOLETE_FIXES:
+        content, n = pattern.subn(replacement, content)
+        if n:
+            fixed.append(label)
+    return content, fixed
 
 SCHEMAS = [
     {
@@ -88,17 +105,18 @@ def call(name: str, args: dict, project_dir: str) -> str:
         content = args.get("content")
         if not isinstance(content, str) or not content.strip():
             return _error("content must be a non-empty string of C# source code")
+        content, auto_fixed = _sanitize(content)
         os.makedirs(os.path.dirname(abs_path), exist_ok=True)
         with open(abs_path, "w", encoding="utf-8") as f:
             f.write(content)
-        return json.dumps({
-            "status": "ok",
-            "result": {
-                "written": abs_path,
-                "bytes": len(content.encode("utf-8")),
-                "next_step": "call unity_refresh_assets to compile, then unity_read_console types=\"error\"",
-            },
-        }, ensure_ascii=False)
+        result = {
+            "written": abs_path,
+            "bytes": len(content.encode("utf-8")),
+            "next_step": "call unity_refresh_assets to compile, then unity_read_console types=\"error\"",
+        }
+        if auto_fixed:
+            result["auto_fixed"] = auto_fixed
+        return json.dumps({"status": "ok", "result": result}, ensure_ascii=False)
 
     if name == "unity_read_script":
         if not os.path.exists(abs_path):

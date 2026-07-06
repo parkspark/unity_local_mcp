@@ -139,6 +139,15 @@ class UnityTools:
     async def __aexit__(self, *exc):
         await self._stack.aclose()
 
+    def _dismiss_known_modals(self) -> bool:
+        """브리지를 마비시키는 알려진 에디터 모달을 자동 처리. 처리했으면 True."""
+        if not config.AUTO_CONSENT:
+            return False
+        import winmodal
+        consent = winmodal.dismiss_script_update_consent()
+        scene = winmodal.dismiss_scene_modified_ignore()
+        return consent or scene
+
     async def _reconnect_if_port_changed(self) -> bool:
         """브리지가 도메인 리로드로 다른 포트에 바인드했으면 서버를 새 포트로 재기동.
 
@@ -188,6 +197,8 @@ class UnityTools:
             prev_focus = winfocus.focus_unity()
         await asyncio.sleep(1.5)  # 컴파일은 refresh 반환 직후에 시작될 수 있다
         for _ in range(45):  # 최대 ~90초 (첫 스크립트 임포트 + 도메인 리로드는 오래 걸린다)
+            if self._dismiss_known_modals():
+                await asyncio.sleep(2)  # 모달 해제 후 에디터가 이어서 진행할 시간
             state = await self._call_once("unity_get_state", {})
             try:
                 r = json.loads(state)["result"]
@@ -268,11 +279,15 @@ class UnityTools:
             "Empty response from Unity bridge" in text and name in _READONLY
         )
         if retryable:
+            # 모달이 에디터를 막아 생긴 무응답일 수 있다 — 알려진 모달부터 처리
+            dismissed = self._dismiss_known_modals()
             # 리로드로 브리지가 다른 포트로 옮겨갔을 수 있다
             if not await self._reconnect_if_port_changed():
                 await asyncio.sleep(4)
                 await self._reconnect_if_port_changed()
             text = await self._call_once(name, args)
+            if dismissed:
+                text += "\n[막고 있던 API 업데이트 동의 모달을 자동 처리했습니다]"
         if name == "unity_refresh_assets":
             text = await self._wait_for_compile(text)
         self.last_raw_result = text
