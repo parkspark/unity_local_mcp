@@ -8,7 +8,7 @@ import json
 import os
 import re
 
-NAMES = {"unity_write_script", "unity_read_script", "unity_delete_script"}
+NAMES = {"unity_write_script", "unity_read_script", "unity_delete_script", "unity_wait"}
 
 # 브리지 자기 자신은 삭제 금지 — 제어 채널이 끊긴다.
 _PROTECTED_PREFIX = "Assets/Editor/McpBridge/"
@@ -30,6 +30,24 @@ def _sanitize(content: str) -> tuple[str, list[str]]:
     return content, fixed
 
 SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "unity_wait",
+            "description": (
+                "Wait briefly without sending a Unity command. Use this after entering play mode "
+                "so Start/Awake/runtime errors have time to occur before unity_read_console. "
+                "Allowed range is 0.5 to 10 seconds."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "seconds": {"type": "number", "description": "Seconds to wait (0.5..10)."},
+                },
+                "required": ["seconds"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -101,6 +119,17 @@ SCHEMAS = [
 
 def _error(msg: str) -> str:
     return json.dumps({"status": "error", "error": msg}, ensure_ascii=False)
+
+
+def wait_seconds(args: dict) -> float:
+    """Validate a bounded host-side wait used for runtime checks."""
+    try:
+        seconds = float(args.get("seconds"))
+    except (TypeError, ValueError):
+        raise ValueError("seconds must be a number between 0.5 and 10")
+    if not 0.5 <= seconds <= 10:
+        raise ValueError("seconds must be between 0.5 and 10")
+    return seconds
 
 
 def _resolve(project_dir: str, path: str) -> str:

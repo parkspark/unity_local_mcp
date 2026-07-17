@@ -1,12 +1,14 @@
 """Ollama tool-call 에이전트 루프."""
 
 import json
+import os
 import re
 
 import ollama
 
 import config
 from mcp_client import UnityTools
+from task_contract import TaskContract
 
 SYSTEM_PROMPT = """\
 You are a Unity Editor assistant. You control a live Unity Editor through the provided tools.
@@ -37,10 +39,36 @@ Writing C# scripts:
 
 # qwen3-coder가 <tool_call> 여는 태그를 생략하는 등 포맷을 벗어나면 Ollama 파서가
 # 놓치고 텍스트로 샌다. 그런 경우를 직접 파싱해 복구한다.
+SYSTEM_PROMPT += """
+
+Execution policy:
+- Do not use unity_execute_menu_item; native dialogs are intentionally blocked.
+- Existing scripts are out of scope unless the user explicitly names their Assets/... path.
+- The host enforces script compilation checks after writes and a unity_wait + runtime error check after play mode. Complete those checks before claiming success.
+"""
+
 _LEAKED_TOOLCALL = re.compile(r"<(function|tool_call)[=\s>]")
 _FUNC_BLOCK = re.compile(r"<function=([\w\-.]+)>(.*?)</function>", re.S)
 _PARAM = re.compile(r"<parameter=([\w\-.]+)>\n?(.*?)\n?</parameter>", re.S)
 _MARKUP = re.compile(r"</?(?:tool_call|function|parameter)[^>]*>")
+
+
+def _screenshot_path(result: str) -> str | None:
+    try:
+        data = json.loads(result)
+    except (TypeError, ValueError):
+        return None
+
+    def find(node):
+        if isinstance(node, str) and node.lower().endswith(".png"):
+            return node
+        if isinstance(node, dict):
+            return next((found for value in node.values() if (found := find(value))), None)
+        if isinstance(node, list):
+            return next((found for value in node if (found := find(value))), None)
+        return None
+
+    return find(data)
 
 
 def _salvage_tool_calls(content: str) -> list[tuple[str, dict]]:
@@ -93,9 +121,11 @@ class Agent:
         self.on_text = on_text
         self.on_tool = on_tool
         self.on_warn = on_warn
+        self.known_session_scripts: set[str] = set()
 
     def reset(self):
         self.history = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.known_session_scripts.clear()
 
     def _estimated_tokens(self) -> int:
         chars = sum(len(str(m.get("content") or "")) for m in self.history)
@@ -154,7 +184,38 @@ class Agent:
             )
         return content, calls
 
+    async def _inspect_screenshot(self, result: str) -> str | None:
+        """Optionally feed a locally analysed screenshot back into this tool loop."""
+        if not config.AUTO_VISION:
+            return None
+        path = _screenshot_path(result)
+        if path and not os.path.isabs(path):
+            # Unity accepts project-relative output paths. Resolve those before
+            # giving the image to the local vision model.
+            path = os.path.join(config.UNITY_PROJECT_DIR, path)
+        if not path or not os.path.exists(path):
+            return None
+        try:
+            response = await ollama.AsyncClient().chat(
+                model=config.VISION_MODEL,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        "Inspect this Unity game screenshot. Report only observable facts: "
+                        "whether the requested game objects/UI are visible, obvious layout problems, "
+                        "and whether the image is too incomplete to verify."
+                    ),
+                    "images": [path],
+                }],
+                options={"temperature": 0},
+            )
+        except Exception as e:
+            self.on_warn(f"Local vision analysis failed: {type(e).__name__}: {e}")
+            return None
+        return response.message.content or None
+
     async def run_turn(self, user_text: str):
+        contract = TaskContract.from_request(user_text, self.known_session_scripts)
         self.history.append({"role": "user", "content": user_text})
         self._trim_history()
 
@@ -172,11 +233,29 @@ class Agent:
                 }
             )
             if not calls:
+                missing = contract.missing_verification()
+                if missing:
+                    self.on_warn("Verification is incomplete; asking the local model to finish it.")
+                    self.history.append({
+                        "role": "user",
+                        "content": "[Required verification before completion] " + "; ".join(missing),
+                    })
+                    continue
                 return  # 최종 답변은 이미 스트리밍으로 출력됨
 
             for name, args in calls:
-                result = await self.tools.call(name, args)
+                args, violation = contract.prepare_call(name, args)
+                if violation:
+                    result = json.dumps({"status": "error", "error": violation}, ensure_ascii=False)
+                    self.on_warn(violation)
+                else:
+                    result = await self.tools.call(name, args)
+                    contract.observe(name, args, result)
+                    self.known_session_scripts = set(contract.session_scripts)
                 self.on_tool(name, args, result)
+                vision = await self._inspect_screenshot(result) if name == "unity_screenshot" else None
+                if vision:
+                    result += f"\n[Local vision result from {config.VISION_MODEL}] {vision}"
                 self.history.append(
                     {"role": "tool", "tool_name": name, "content": result}
                 )

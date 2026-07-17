@@ -4,7 +4,9 @@ import os
 
 # Ollama
 MODEL = os.environ.get("UNITY_AGENT_MODEL", "qwen3-coder:30b")
-VISION_MODEL = os.environ.get("UNITY_AGENT_VISION_MODEL", "qwen2.5vl:7b")
+# qwen2.5vl:32b is installed on the target workstation. Keep this overrideable
+# for smaller machines, but do not default to a model that is absent locally.
+VISION_MODEL = os.environ.get("UNITY_AGENT_VISION_MODEL", "qwen2.5vl:32b")
 NUM_CTX = int(os.environ.get("UNITY_AGENT_NUM_CTX", "32768"))
 TEMPERATURE = float(os.environ.get("UNITY_AGENT_TEMPERATURE", "0.2"))
 KEEP_ALIVE = os.environ.get("UNITY_AGENT_KEEP_ALIVE", "30m")
@@ -13,7 +15,7 @@ STREAM = os.environ.get("UNITY_AGENT_STREAM", "1") != "0"
 
 # 에이전트 루프
 MAX_ITERS = int(os.environ.get("UNITY_AGENT_MAX_ITERS", "15"))
-TRUNCATE_CHARS = int(os.environ.get("UNITY_AGENT_TRUNCATE_CHARS", "8000"))
+TRUNCATE_CHARS = int(os.environ.get("UNITY_AGENT_TRUNCATE_CHARS", "4000"))
 # 한 턴에서 같은 툴이 이 횟수만큼 호출되면 배치/스크립트 사용을 권고. 0이면 끔.
 LOOP_GUARD_THRESHOLD = int(os.environ.get("UNITY_AGENT_LOOP_GUARD", "4"))
 # 히스토리 트리밍 기준: 추정 토큰이 num_ctx의 이 비율을 넘으면 오래된 대화 삭제
@@ -31,6 +33,11 @@ UNITY_PROJECT_DIR = os.environ.get("UNITY_PROJECT_DIR", r"C:\Users\park\My proje
 
 # 스크린샷 PNG를 자동으로 열지 여부
 AUTO_OPEN_SCREENSHOT = os.environ.get("UNITY_AGENT_AUTO_OPEN", "1") != "0"
+# When enabled, a screenshot tool result is analysed by VISION_MODEL locally and
+# the finding is returned to the coding model in the same task loop. It is off
+# by default because the 30B coder and 32B vision model should be run
+# sequentially on a 32 GB VRAM card.
+AUTO_VISION = os.environ.get("UNITY_AGENT_AUTO_VISION", "0") != "0"
 
 # 컴파일 대기 시 Unity 창에 잠깐 포커스를 줄지 여부.
 # Unity는 백그라운드에 있으면 스크립트 컴파일을 미루므로 기본 켬.

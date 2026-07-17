@@ -259,6 +259,16 @@ class UnityTools:
         return text
 
     async def call(self, name: str, args: dict) -> str:
+        if name == "unity_wait":
+            try:
+                seconds = local_tools.wait_seconds(args)
+            except ValueError as e:
+                return _truncate(json.dumps({"status": "error", "error": str(e)}, ensure_ascii=False))
+            await asyncio.sleep(seconds)
+            text = json.dumps({"status": "ok", "result": {"waited_seconds": seconds}}, ensure_ascii=False)
+            self.last_raw_result = text
+            return text
+
         if name in local_tools.NAMES:
             project_dir = await self._resolve_project_dir()
             if project_dir is None:
