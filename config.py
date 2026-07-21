@@ -60,3 +60,13 @@ PLAN_MAX_TOTAL_ITERS = int(os.environ.get("UNITY_AGENT_PLAN_TOTAL_ITERS", "60"))
 # unity_send_key 직전에 Unity 창에 포커스를 줄지. Unity가 최소화/백그라운드면
 # 플레이어 루프 전체가 멈춰 입력이 게임에 닿지 않는 것을 실측으로 확인 — 기본 켬.
 FOCUS_UNITY_ON_INPUT = os.environ.get("UNITY_AGENT_FOCUS_INPUT", "1") != "0"
+
+# ---- v1.8: 실행 로그 ----
+
+# Agent.run_turn() 단위로 사람이 읽는 .log와 기계 분석용 .jsonl을 함께 저장한다.
+# CLI뿐 아니라 e2e_v17_run.py 같은 프로그램 호출도 같은 공통 경로를 사용한다.
+RUN_LOGS = os.environ.get("UNITY_AGENT_RUN_LOGS", "1") != "0"
+RUN_LOG_DIR = os.path.abspath(os.environ.get(
+    "UNITY_AGENT_RUN_LOG_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "runs"),
+))

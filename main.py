@@ -24,7 +24,8 @@ console = Console()
 
 HELP = """\
 명령: /reset 대화 초기화 · /tools 도구 목록 · /model <이름> 모델 변경
-      /last 마지막 도구 결과(절단 전) · /look [질문] 스크린샷 분석(--vision) · /quit 종료"""
+      /last 마지막 도구 결과(절단 전) · /log 마지막 실행 로그 경로
+      /look [질문] 스크린샷 분석(--vision) · /quit 종료"""
 
 
 def _find_png(result_text: str) -> str | None:
@@ -170,6 +171,13 @@ async def main():
                         console.print(escape(ut.last_raw_result))
                     else:
                         console.print("[dim](없음)[/dim]")
+                elif cmd == "/log":
+                    if agent.last_run_log_paths:
+                        text_path, jsonl_path = agent.last_run_log_paths
+                        console.print(f"[dim]텍스트 로그: {text_path}[/dim]")
+                        console.print(f"[dim]JSONL 로그: {jsonl_path}[/dim]")
+                    else:
+                        console.print("[dim](아직 저장된 실행 로그가 없습니다)[/dim]")
                 elif cmd == "/look":
                     await cli.look(agent, rest.strip())
                 else:
@@ -187,6 +195,11 @@ async def main():
                     console.print(f"[yellow]모델을 받으세요: ollama pull {agent.model}[/yellow]")
             except Exception as e:
                 console.print(f"\n[red]{type(e).__name__}: {escape(str(e))}[/red]")
+            finally:
+                if agent.last_run_log_paths:
+                    text_path, jsonl_path = agent.last_run_log_paths
+                    console.print(f"[dim]실행 로그: {text_path}[/dim]")
+                    console.print(f"[dim]JSONL: {jsonl_path}[/dim]")
 
     console.print("[dim]종료합니다.[/dim]")
 

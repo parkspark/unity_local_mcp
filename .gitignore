@@ -1,6 +1,7 @@
 .venv/
 __pycache__/
 *.log
+logs/
 .claude/
 .gemini/
 .idea/

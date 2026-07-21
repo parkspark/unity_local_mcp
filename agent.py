@@ -1,14 +1,17 @@
 """Ollama tool-call 에이전트 루프."""
 
+import asyncio
 import json
 import os
 import re
+import traceback
 
 import ollama
 
 import config
 import planner
 from mcp_client import UnityTools
+from run_logging import RunLogger
 from task_contract import TaskContract
 
 SYSTEM_PROMPT = """\
@@ -157,18 +160,54 @@ def _milestone_prompt(plan: "planner.Plan", idx: int, ledger: "planner.ArtifactL
 
 
 class Agent:
-    def __init__(self, tools: UnityTools, on_text, on_tool, on_warn, on_milestone=None):
+    def __init__(self, tools: UnityTools, on_text, on_tool, on_warn, on_milestone=None,
+                 enable_logging: bool | None = None):
         self.client = ollama.AsyncClient()
         self.tools = tools
         self.model = config.MODEL
         self.history: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
         # 표시 콜백: on_text(스트리밍 텍스트 조각), on_tool(이름, 인자, 결과), on_warn(경고문)
         self.on_text = on_text
-        self.on_tool = on_tool
-        self.on_warn = on_warn
+        self._on_tool_callback = on_tool
+        self._on_warn_callback = on_warn
         # on_milestone(idx, total, title): 플랜 실행 진행 표시 (없으면 무시)
-        self.on_milestone = on_milestone or (lambda idx, total, title: None)
+        self._on_milestone_callback = on_milestone or (lambda idx, total, title: None)
+        self.on_tool = self._emit_tool
+        self.on_warn = self._emit_warn
+        self.on_milestone = self._emit_milestone
+        self.enable_logging = config.RUN_LOGS if enable_logging is None else enable_logging
+        self._run_log: RunLogger | None = None
+        self._run_log_error: str | None = None
+        self.last_run_log_paths: tuple[str, str] | None = None
         self.known_session_scripts: set[str] = set()
+
+    def _log(self, event: str, **payload):
+        if self._run_log is None:
+            return
+        try:
+            self._run_log.event(event, **payload)
+        except OSError as e:
+            self._run_log_error = f"{type(e).__name__}: {e}"
+            self._run_log.abort()
+            self._run_log = None
+            try:
+                self._on_warn_callback(
+                    f"실행 로그 기록이 중단됐습니다({self._run_log_error}). 작업은 계속합니다."
+                )
+            except Exception:
+                pass
+
+    def _emit_tool(self, name: str, args: dict, result: str):
+        self._log("tool_result", name=name, arguments=args, result=result)
+        self._on_tool_callback(name, args, result)
+
+    def _emit_warn(self, message: str):
+        self._log("warning", message=message)
+        self._on_warn_callback(message)
+
+    def _emit_milestone(self, idx: int, total: int, title: str):
+        self._log("milestone_started", index=idx + 1, total=total, title=title)
+        self._on_milestone_callback(idx, total, title)
 
     def reset(self):
         self.history = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -229,6 +268,12 @@ class Agent:
                 "tool-call이 텍스트로 새어 나왔지만 복구하지 못했습니다. "
                 "Ollama 업데이트 또는 /reset을 시도하세요."
             )
+        self._log(
+            "assistant_response",
+            content=content,
+            tool_calls=[{"name": name, "arguments": args} for name, args in calls],
+            tools_enabled=use_tools,
+        )
         return content, calls
 
     async def _inspect_screenshot(self, result: str) -> str | None:
@@ -259,26 +304,94 @@ class Agent:
         except Exception as e:
             self.on_warn(f"Local vision analysis failed: {type(e).__name__}: {e}")
             return None
-        return response.message.content or None
+        content = response.message.content or None
+        self._log("vision_result", model=config.VISION_MODEL, content=content, image_path=path)
+        return content
 
     async def run_turn(self, user_text: str):
-        plan = None
-        if config.PLANNER != "off" and (
-            config.PLANNER == "always" or planner.looks_large(user_text)
-        ):
-            self.on_warn("큰 요청으로 판단해 실행 계획을 먼저 세웁니다...")
-            plan = await self._make_plan(user_text)
-        if plan is None:
-            await self._run_single(user_text)
-        else:
-            self.on_warn(
-                "실행 계획: "
-                + " → ".join(
-                    f"{m.id} {m.title} (verify: {','.join(m.verify) or 'none'})"
-                    for m in plan.milestones
+        """Execute one request and persist a v1.8 transcript for every outcome."""
+        self.last_run_log_paths = None
+        self._run_log_error = None
+        if self.enable_logging:
+            try:
+                self._run_log = RunLogger(config.RUN_LOG_DIR, user_text, self.model)
+                self.last_run_log_paths = self._run_log.paths
+                self._log(
+                    "run_configuration",
+                    planner=config.PLANNER,
+                    max_iters=config.MAX_ITERS,
+                    milestone_max_iters=config.MILESTONE_MAX_ITERS,
+                    plan_total_iters=config.PLAN_MAX_TOTAL_ITERS,
                 )
+            except OSError as e:
+                self._run_log = None
+                self._run_log_error = f"{type(e).__name__}: {e}"
+                self._on_warn_callback(
+                    f"실행 로그를 시작하지 못했습니다({self._run_log_error}). 작업은 계속합니다."
+                )
+
+        outcome = "completed"
+        success = False
+        try:
+            plan = None
+            if config.PLANNER != "off" and (
+                config.PLANNER == "always" or planner.looks_large(user_text)
+            ):
+                self.on_warn("큰 요청으로 판단해 실행 계획을 먼저 세웁니다...")
+                plan = await self._make_plan(user_text)
+            if plan is None:
+                self._log("execution_mode", mode="single")
+                success = await self._run_single(user_text)
+            else:
+                self._log(
+                    "execution_mode",
+                    mode="plan",
+                    milestones=[{
+                        "id": m.id,
+                        "title": m.title,
+                        "goal": m.goal,
+                        "deliverables": m.deliverables,
+                        "verify": m.verify,
+                        "max_iters": m.max_iters,
+                    } for m in plan.milestones],
+                )
+                self.on_warn(
+                    "실행 계획: "
+                    + " → ".join(
+                        f"{m.id} {m.title} (verify: {','.join(m.verify) or 'none'})"
+                        for m in plan.milestones
+                    )
+                )
+                success = await self._run_plan(user_text, plan)
+            outcome = "completed" if success else "failed"
+            return success
+        except BaseException as e:
+            if isinstance(e, (KeyboardInterrupt, asyncio.CancelledError)):
+                outcome = "interrupted"
+            else:
+                outcome = "error"
+            self._log(
+                "exception",
+                exception_type=type(e).__name__,
+                message=str(e),
+                traceback=traceback.format_exc(),
             )
-            await self._run_plan(user_text, plan)
+            raise
+        finally:
+            logger = self._run_log
+            if logger is not None:
+                try:
+                    logger.close(outcome, logging_error=self._run_log_error)
+                except OSError as e:
+                    self._run_log_error = f"{type(e).__name__}: {e}"
+                    logger.abort()
+                    try:
+                        self._on_warn_callback(
+                            f"실행 로그 종료 기록에 실패했습니다({self._run_log_error})."
+                        )
+                    except Exception:
+                        pass
+                self._run_log = None
 
     async def _make_plan(self, user_text: str):
         """플래닝 호출 래퍼 (테스트에서 오버라이드 지점)."""
@@ -307,6 +420,7 @@ class Agent:
             if not calls:
                 missing = contract.missing_verification()
                 if missing:
+                    self._log("verification_incomplete", missing=missing)
                     self.on_warn(
                         "Verification is incomplete: " + "; ".join(missing)
                         + " — asking the local model to finish it."
@@ -354,7 +468,7 @@ class Agent:
                         break
         return False, "tool-call iteration limit reached", max_iters
 
-    async def _run_single(self, user_text: str):
+    async def _run_single(self, user_text: str) -> bool:
         """기존 단일 ReAct 루프 (v1.6까지의 run_turn 동작)."""
         contract = TaskContract.from_request(user_text, self.known_session_scripts)
         self.history.append({"role": "user", "content": user_text})
@@ -362,7 +476,7 @@ class Agent:
 
         ok, _note, _used = await self._react_loop(self.history, contract, config.MAX_ITERS)
         if ok:
-            return
+            return True
 
         # 반복 한도 도달: 툴 없이 요약만 받는다
         self.history.append(
@@ -373,6 +487,7 @@ class Agent:
         )
         content, _ = await self._chat(use_tools=False)
         self.history.append({"role": "assistant", "content": content})
+        return False
 
     def _deliverables_missing(self, milestone) -> list[str]:
         """마일스톤 deliverables의 파일 존재를 호스트가 결정적으로 확인."""
@@ -393,7 +508,8 @@ class Agent:
             {"role": "user", "content": _milestone_prompt(plan, idx, ledger, prev_error)},
         ]
         # 마일스톤 경계에서 도메인 리로드/포트 호핑을 흡수 (실패해도 call()의 재시도가 처리)
-        await self.tools.call("unity_ping", {})
+        ping_result = await self.tools.call("unity_ping", {})
+        self._log("milestone_ping", milestone_id=m.id, result=ping_result)
         ok, note, used = await self._react_loop(messages, contract, max_iters or m.max_iters, ledger)
         if ok:
             missing_files = self._deliverables_missing(m)
@@ -401,7 +517,7 @@ class Agent:
                 return False, "deliverables not created: " + ", ".join(missing_files), used
         return ok, note, used
 
-    async def _run_plan(self, user_text: str, plan):
+    async def _run_plan(self, user_text: str, plan) -> bool:
         """마일스톤 순차 실행. 마일스톤마다 fresh 히스토리 + 자체 계약."""
         self.history.append({"role": "user", "content": user_text})
         ledger = planner.ArtifactLedger()
@@ -424,6 +540,15 @@ class Agent:
                 )
                 budget -= used
             ledger.milestone_done(m.title, ok, note)
+            self._log(
+                "milestone_finished",
+                id=m.id,
+                title=m.title,
+                outcome="completed" if ok else "failed",
+                note=note,
+                retries=retries,
+                remaining_plan_iterations=budget,
+            )
             if not ok:
                 self.on_warn(f"마일스톤 '{m.title}' 최종 실패 — 계획을 중단합니다.")
                 break
@@ -432,5 +557,10 @@ class Agent:
         for pending in plan.milestones[len(ledger.done):]:
             ledger.milestone_pending(pending.title)
         report = ledger.report()
+        self._log("plan_report", report=report)
         self.on_text("\n" + report + "\n")
         self.history.append({"role": "assistant", "content": report})
+        return (
+            len(ledger.done) == len(plan.milestones)
+            and all(ok is True for _title, ok, _note in ledger.done)
+        )
