@@ -7,6 +7,7 @@ import re
 import ollama
 
 import config
+import planner
 from mcp_client import UnityTools
 from task_contract import TaskContract
 
@@ -35,6 +36,19 @@ Writing C# scripts:
 - To remove a stale, duplicate, or conflicting script that breaks compilation, DELETE it with unity_delete_script (do NOT just leave it or try to work around it), then unity_refresh_assets to recompile.
 - This project uses the NEW Input System ONLY. NEVER use the legacy UnityEngine.Input API (Input.GetAxis, Input.GetButtonDown, Input.GetKey...) — it throws InvalidOperationException at runtime. Instead `using UnityEngine.InputSystem;` and read `Keyboard.current` / `Mouse.current` / `Gamepad.current`, e.g. `keyboard.aKey.isPressed`, `keyboard.spaceKey.wasPressedThisFrame`. Always null-check `Keyboard.current` first.
 - Unity 6 renamed APIs — obsolete names trigger a blocking editor dialog. Use `rb.linearVelocity` (NOT `rb.velocity`) and `Object.FindFirstObjectByType<T>()` (NOT `FindObjectOfType<T>()`).
+
+Data-driven levels (games with stages/levels):
+- NEVER hand-build level layouts in the scene or hardcode them in scripts. Install the canonical loader ONCE with unity_install_level_loader → unity_refresh_assets → check errors → add the LevelLoader component to an empty GameObject and set its levelFile property.
+- Write each level as JSON with unity_write_level to Assets/StreamingAssets/Levels/levelN.json. The host validates the schema and reports specific errors — fix and rewrite until it passes.
+- The player object MUST be named exactly "Player" (the loader moves it to player_spawn). Chain levels with "next_level": "level2.json"; the last level uses null.
+- LevelLoader builds 3D cubes and trigger colliders. Player movement MUST use Rigidbody/Collider and Vector3/Collision (3D), NEVER Rigidbody2D/Collider2D/Vector2/Collision2D.
+- Level JSON needs NO recompile: after writing, verify directly with play mode and look for "[LevelLoader] Loaded <name>" in the console. "[LevelLoader] GOAL reached" confirms level clear; "[LevelLoader] ALL LEVELS CLEAR" confirms the chain end.
+
+Input simulation (gameplay verification):
+- unity_send_key simulates a keyboard key during play mode only. action "tap" presses and auto-releases after `duration` seconds; "press" holds until "release".
+- To verify movement: unity_get_gameobject Player (note position) → unity_send_key key="rightArrow" action="press" → unity_wait 1 → unity_send_key key="rightArrow" action="release" → unity_get_gameobject Player again and compare positions.
+- Unchanged before/after positions are a failed verification: fix the Player component/physics/input implementation, then repeat the measurement.
+- Combos: press one key, tap another, then release (e.g. hold rightArrow, tap space to jump).
 """
 
 # qwen3-coder가 <tool_call> 여는 태그를 생략하는 등 포맷을 벗어나면 Ollama 파서가
@@ -111,8 +125,39 @@ def _merge_leaked_calls(content, calls, had_leak):
     return cleaned, new + calls, len(new)
 
 
+def _milestone_prompt(plan: "planner.Plan", idx: int, ledger: "planner.ArtifactLedger",
+                      prev_error: str = "") -> str:
+    """마일스톤 실행 프롬프트. 전부 호스트가 결정적으로 합성한다(모델 요약 없음)."""
+    done_status = {title: ok for title, ok, _ in ledger.done}
+    plan_lines = []
+    for i, m in enumerate(plan.milestones):
+        if m.title in done_status:
+            mark = "완료" if done_status[m.title] else "실패"
+        elif i == idx:
+            mark = "← 현재"
+        else:
+            mark = "대기"
+        plan_lines.append(f"{m.id} {m.title} [{mark}]")
+    m = plan.milestones[idx]
+    parts = [
+        f"[전체 목표] {plan.request}",
+        "[계획]\n" + "\n".join(plan_lines),
+        "[지금까지의 산출물]\n" + ledger.summary(),
+    ]
+    if prev_error:
+        parts.append(f"[이전 시도 실패 원인] {prev_error}")
+    parts.append(f"[현재 마일스톤 {m.id}] {m.goal}")
+    if m.deliverables:
+        parts.append("이 마일스톤이 만들어야 하는 파일: " + ", ".join(m.deliverables))
+    parts.append(
+        "이 마일스톤만 수행하라. 이후 마일스톤의 작업은 하지 마라. "
+        "필요한 검증(누락 시 호스트가 알려준다)까지 끝나면 한두 문장으로 보고하고 멈춰라."
+    )
+    return "\n\n".join(parts)
+
+
 class Agent:
-    def __init__(self, tools: UnityTools, on_text, on_tool, on_warn):
+    def __init__(self, tools: UnityTools, on_text, on_tool, on_warn, on_milestone=None):
         self.client = ollama.AsyncClient()
         self.tools = tools
         self.model = config.MODEL
@@ -121,6 +166,8 @@ class Agent:
         self.on_text = on_text
         self.on_tool = on_tool
         self.on_warn = on_warn
+        # on_milestone(idx, total, title): 플랜 실행 진행 표시 (없으면 무시)
+        self.on_milestone = on_milestone or (lambda idx, total, title: None)
         self.known_session_scripts: set[str] = set()
 
     def reset(self):
@@ -143,11 +190,11 @@ class Agent:
                 1, {"role": "user", "content": "[이전 대화 일부가 컨텍스트 한도로 잘렸습니다]"}
             )
 
-    async def _chat(self, use_tools: bool = True):
+    async def _chat(self, messages: list[dict] | None = None, use_tools: bool = True):
         """1회 모델 호출. (content, [(도구명, 인자)]) 반환. 스트리밍 텍스트는 on_text로 전달."""
         kwargs = dict(
             model=self.model,
-            messages=self.history,
+            messages=self.history if messages is None else messages,
             keep_alive=config.KEEP_ALIVE,
             options={"num_ctx": config.NUM_CTX, "temperature": config.TEMPERATURE},
         )
@@ -215,15 +262,40 @@ class Agent:
         return response.message.content or None
 
     async def run_turn(self, user_text: str):
-        contract = TaskContract.from_request(user_text, self.known_session_scripts)
-        self.history.append({"role": "user", "content": user_text})
-        self._trim_history()
+        plan = None
+        if config.PLANNER != "off" and (
+            config.PLANNER == "always" or planner.looks_large(user_text)
+        ):
+            self.on_warn("큰 요청으로 판단해 실행 계획을 먼저 세웁니다...")
+            plan = await self._make_plan(user_text)
+        if plan is None:
+            await self._run_single(user_text)
+        else:
+            self.on_warn(
+                "실행 계획: "
+                + " → ".join(
+                    f"{m.id} {m.title} (verify: {','.join(m.verify) or 'none'})"
+                    for m in plan.milestones
+                )
+            )
+            await self._run_plan(user_text, plan)
 
+    async def _make_plan(self, user_text: str):
+        """플래닝 호출 래퍼 (테스트에서 오버라이드 지점)."""
+        return await planner.make_plan(self.client, self.model, user_text, self.on_warn)
+
+    async def _react_loop(self, messages: list[dict], contract: TaskContract,
+                          max_iters: int, ledger=None) -> tuple[bool, str, int]:
+        """도구 호출 루프 본문. (정상 종료 여부, 실패 사유, 사용 iteration) 반환.
+
+        단일 모드에서는 messages가 self.history이고, 플랜 모드에서는 마일스톤별
+        fresh 리스트다. 동작(정책 게이트, 검증 강제, 루프 가드, 누수 복구)은 동일.
+        """
         call_counts: dict[str, int] = {}
         nudged = False
-        for _ in range(config.MAX_ITERS):
-            content, calls = await self._chat()
-            self.history.append(
+        for iteration in range(max_iters):
+            content, calls = await self._chat(messages)
+            messages.append(
                 {
                     "role": "assistant",
                     "content": content,
@@ -235,13 +307,16 @@ class Agent:
             if not calls:
                 missing = contract.missing_verification()
                 if missing:
-                    self.on_warn("Verification is incomplete; asking the local model to finish it.")
-                    self.history.append({
+                    self.on_warn(
+                        "Verification is incomplete: " + "; ".join(missing)
+                        + " — asking the local model to finish it."
+                    )
+                    messages.append({
                         "role": "user",
                         "content": "[Required verification before completion] " + "; ".join(missing),
                     })
                     continue
-                return  # 최종 답변은 이미 스트리밍으로 출력됨
+                return True, "", iteration + 1  # 최종 답변은 이미 스트리밍으로 출력됨
 
             for name, args in calls:
                 args, violation = contract.prepare_call(name, args)
@@ -251,12 +326,14 @@ class Agent:
                 else:
                     result = await self.tools.call(name, args)
                     contract.observe(name, args, result)
+                    if ledger is not None:
+                        ledger.observe(name, args, result)
                     self.known_session_scripts = set(contract.session_scripts)
                 self.on_tool(name, args, result)
                 vision = await self._inspect_screenshot(result) if name == "unity_screenshot" else None
                 if vision:
                     result += f"\n[Local vision result from {config.VISION_MODEL}] {vision}"
-                self.history.append(
+                messages.append(
                     {"role": "tool", "tool_name": name, "content": result}
                 )
 
@@ -265,7 +342,7 @@ class Agent:
                 for name, _a in calls:
                     call_counts[name] = call_counts.get(name, 0) + 1
                     if call_counts[name] >= config.LOOP_GUARD_THRESHOLD:
-                        self.history.append({"role": "user", "content": (
+                        messages.append({"role": "user", "content": (
                             "[시스템] 같은 툴을 반복 호출하고 있습니다. 반복적인 오브젝트 생성은 "
                             "unity_create_gameobjects 배치 툴 하나로 처리하거나, 큰 그리드는 "
                             "스크립트의 Awake()/Start()에서 생성하세요."
@@ -275,6 +352,17 @@ class Agent:
                         )
                         nudged = True
                         break
+        return False, "tool-call iteration limit reached", max_iters
+
+    async def _run_single(self, user_text: str):
+        """기존 단일 ReAct 루프 (v1.6까지의 run_turn 동작)."""
+        contract = TaskContract.from_request(user_text, self.known_session_scripts)
+        self.history.append({"role": "user", "content": user_text})
+        self._trim_history()
+
+        ok, _note, _used = await self._react_loop(self.history, contract, config.MAX_ITERS)
+        if ok:
+            return
 
         # 반복 한도 도달: 툴 없이 요약만 받는다
         self.history.append(
@@ -285,3 +373,64 @@ class Agent:
         )
         content, _ = await self._chat(use_tools=False)
         self.history.append({"role": "assistant", "content": content})
+
+    def _deliverables_missing(self, milestone) -> list[str]:
+        """마일스톤 deliverables의 파일 존재를 호스트가 결정적으로 확인."""
+        if not config.UNITY_PROJECT_DIR:
+            return []
+        missing = []
+        for rel in milestone.deliverables:
+            if not os.path.exists(os.path.join(config.UNITY_PROJECT_DIR, rel)):
+                missing.append(rel)
+        return missing
+
+    async def _run_milestone(self, plan, idx: int, ledger, prev_error: str = "",
+                             max_iters: int | None = None) -> tuple[bool, str, int]:
+        m = plan.milestones[idx]
+        contract = TaskContract.for_milestone(m, self.known_session_scripts)
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": _milestone_prompt(plan, idx, ledger, prev_error)},
+        ]
+        # 마일스톤 경계에서 도메인 리로드/포트 호핑을 흡수 (실패해도 call()의 재시도가 처리)
+        await self.tools.call("unity_ping", {})
+        ok, note, used = await self._react_loop(messages, contract, max_iters or m.max_iters, ledger)
+        if ok:
+            missing_files = self._deliverables_missing(m)
+            if missing_files:
+                return False, "deliverables not created: " + ", ".join(missing_files), used
+        return ok, note, used
+
+    async def _run_plan(self, user_text: str, plan):
+        """마일스톤 순차 실행. 마일스톤마다 fresh 히스토리 + 자체 계약."""
+        self.history.append({"role": "user", "content": user_text})
+        ledger = planner.ArtifactLedger()
+        budget = config.PLAN_MAX_TOTAL_ITERS
+        for idx, m in enumerate(plan.milestones):
+            if budget <= 0:
+                ledger.milestone_done(m.title, False, "plan iteration budget exhausted")
+                break
+            self.on_milestone(idx, len(plan.milestones), m.title)
+            iters = min(m.max_iters, budget)
+            ok, note, used = await self._run_milestone(plan, idx, ledger, max_iters=iters)
+            budget -= used
+            retries = 0
+            while not ok and retries < config.MILESTONE_RETRIES and budget > 0:
+                retries += 1
+                self.on_warn(f"마일스톤 실패({note}) — 재시도 {retries}/{config.MILESTONE_RETRIES}")
+                iters = min(m.max_iters, budget)
+                ok, note, used = await self._run_milestone(
+                    plan, idx, ledger, prev_error=note, max_iters=iters
+                )
+                budget -= used
+            ledger.milestone_done(m.title, ok, note)
+            if not ok:
+                self.on_warn(f"마일스톤 '{m.title}' 최종 실패 — 계획을 중단합니다.")
+                break
+        # 순차 실행이 중단된 경우 사용자에게 후속 단계가 단순 누락된 것이 아니라
+        # 의도적으로 미착수 상태임을 명확히 보여 준다.
+        for pending in plan.milestones[len(ledger.done):]:
+            ledger.milestone_pending(pending.title)
+        report = ledger.report()
+        self.on_text("\n" + report + "\n")
+        self.history.append({"role": "assistant", "content": report})

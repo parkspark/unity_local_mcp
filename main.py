@@ -73,6 +73,9 @@ class Cli:
     def on_warn(self, msg: str):
         console.print(f"\n[yellow]경고: {msg}[/yellow]")
 
+    def on_milestone(self, idx: int, total: int, title: str):
+        console.rule(f"[bold magenta]마일스톤 {idx + 1}/{total}: {title}[/bold magenta]")
+
     async def look(self, agent: Agent, question: str):
         if not self.vision:
             console.print("[yellow]--vision 플래그로 시작해야 /look을 쓸 수 있습니다.[/yellow]")
@@ -102,7 +105,7 @@ async def main():
     cli = Cli(vision)
 
     async with UnityTools() as ut:
-        agent = Agent(ut, cli.on_text, cli.on_tool, cli.on_warn)
+        agent = Agent(ut, cli.on_text, cli.on_tool, cli.on_warn, on_milestone=cli.on_milestone)
         console.print(
             f"[bold]연결됨:[/bold] {len(ut.ollama_tools)} tools · {agent.model} · ctx {config.NUM_CTX}"
         )

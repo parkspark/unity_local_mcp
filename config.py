@@ -46,3 +46,17 @@ FOCUS_UNITY_ON_COMPILE = os.environ.get("UNITY_AGENT_FOCUS_COMPILE", "1") != "0"
 # "Script Updating Consent" 모달(구식 API 자동 변환 동의)을 자동으로 수락할지.
 # 모달이 뜨면 에디터 메인 스레드가 멈춰 브리지가 마비되므로 기본 켬.
 AUTO_CONSENT = os.environ.get("UNITY_AGENT_AUTO_CONSENT", "1") != "0"
+
+# ---- v1.7: 플래너 / 입력 시뮬레이션 ----
+
+# 큰 요청을 마일스톤으로 분해할지: auto(휴리스틱), always, off
+PLANNER = os.environ.get("UNITY_AGENT_PLANNER", "auto")
+PLAN_MAX_MILESTONES = int(os.environ.get("UNITY_AGENT_PLAN_MAX", "6"))
+MILESTONE_MAX_ITERS = int(os.environ.get("UNITY_AGENT_MILESTONE_ITERS", "12"))
+MILESTONE_RETRIES = int(os.environ.get("UNITY_AGENT_MILESTONE_RETRIES", "1"))
+# 계획 전체의 iteration 총량 안전판
+PLAN_MAX_TOTAL_ITERS = int(os.environ.get("UNITY_AGENT_PLAN_TOTAL_ITERS", "60"))
+
+# unity_send_key 직전에 Unity 창에 포커스를 줄지. Unity가 최소화/백그라운드면
+# 플레이어 루프 전체가 멈춰 입력이 게임에 닿지 않는 것을 실측으로 확인 — 기본 켬.
+FOCUS_UNITY_ON_INPUT = os.environ.get("UNITY_AGENT_FOCUS_INPUT", "1") != "0"

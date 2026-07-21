@@ -290,6 +290,11 @@ class UnityTools:
                 f"Available: {', '.join(sorted(self.names))}"
             )
         args = self._coerce_args(name, args)
+        # Unity가 백그라운드/최소화면 플레이어 루프가 멈춰 키 입력이 게임에 닿지 않는다.
+        # 입력 시뮬레이션 전에 호스트가 결정적으로 포커스를 확보한다.
+        if name == "unity_send_key" and config.FOCUS_UNITY_ON_INPUT:
+            import winfocus
+            winfocus.focus_unity()
         text = await self._call_once(name, args)
         # 도메인 리로드(플레이 모드 전환·스크립트 컴파일) 중엔 브리지가 몇 초 다운된다.
         # "Cannot reach"는 명령이 Unity에 도달하지 못한 경우라 재시도해도 안전 → 1회만.
