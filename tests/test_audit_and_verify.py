@@ -79,7 +79,8 @@ class ModeTools:
 
 class VerifyScriptedAgent(Agent):
     def __init__(self, tools, callback):
-        super().__init__(tools, callback, lambda *_: None, callback, enable_logging=False)
+        super().__init__(tools, callback, lambda *_: None, callback,
+                         enable_logging=False, enable_verification=False)
         self.prompts = []
 
     async def _chat(self, messages=None, use_tools=True):

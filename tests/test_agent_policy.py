@@ -27,6 +27,7 @@ class ScriptedAgent(Agent):
             lambda name, args, result: events.append((name, args, result)),
             events.append,
             enable_logging=False,
+            enable_verification=False,
         )
         self.turns = iter(turns)
         self.plan = plan

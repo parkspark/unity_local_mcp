@@ -84,3 +84,18 @@ MCP_AUDIT_LOG_DIR = os.path.abspath(os.environ.get(
 TOOL_MODE = os.environ.get("UNITY_AGENT_TOOL_MODE", "full").strip().lower()
 if TOOL_MODE not in {"full", "verify"}:
     TOOL_MODE = "full"
+
+# ---- v1.9: 독립 검증 오케스트레이션 ----
+
+# 모델의 자기 보고와 별개로, 새 컨텍스트의 검증 단계가 실제 Unity 측정값을
+# 수집해야만 요청을 완료로 판정한다. 무한 반복 대신 시간 예산 + 실패 정체 감지로
+# 오래 실행되는 작업도 안전하게 종료한다.
+VERIFY_ORCHESTRATION = os.environ.get("UNITY_AGENT_VERIFY", "1") != "0"
+FIX_MAX_CYCLES = int(os.environ.get("UNITY_AGENT_FIX_CYCLES", "3"))
+FIX_MAX_ITERS = int(os.environ.get("UNITY_AGENT_FIX_ITERS", "20"))
+TASK_TIMEOUT_SECONDS = float(os.environ.get("UNITY_AGENT_TASK_TIMEOUT", "1800"))
+NO_PROGRESS_LIMIT = int(os.environ.get("UNITY_AGENT_NO_PROGRESS_LIMIT", "2"))
+VERIFICATION_RECEIPT_DIR = os.path.abspath(os.environ.get(
+    "UNITY_AGENT_RECEIPT_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "receipts"),
+))

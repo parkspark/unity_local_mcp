@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import time
 import traceback
 
 import ollama
@@ -13,6 +14,9 @@ import planner
 from mcp_client import UnityTools
 from run_logging import RunLogger
 from task_contract import TaskContract
+from verification import (
+    MUTATION_TOOLS, VerificationContract, VerificationSpec, fix_prompt, write_receipt,
+)
 
 SYSTEM_PROMPT = """\
 You are a Unity Editor assistant. You control a live Unity Editor through the provided tools.
@@ -177,7 +181,8 @@ def _milestone_prompt(plan: "planner.Plan", idx: int, ledger: "planner.ArtifactL
 
 class Agent:
     def __init__(self, tools: UnityTools, on_text, on_tool, on_warn, on_milestone=None,
-                 enable_logging: bool | None = None):
+                 enable_logging: bool | None = None,
+                 enable_verification: bool | None = None):
         self.client = ollama.AsyncClient()
         self.tools = tools
         self.model = config.MODEL
@@ -193,12 +198,18 @@ class Agent:
         self.on_warn = self._emit_warn
         self.on_milestone = self._emit_milestone
         self.enable_logging = config.RUN_LOGS if enable_logging is None else enable_logging
+        self.enable_verification = (
+            config.VERIFY_ORCHESTRATION if enable_verification is None else enable_verification
+        )
         self._run_log: RunLogger | None = None
         self._run_log_error: str | None = None
         self.last_run_log_paths: tuple[str, str] | None = None
+        self.last_verification_receipt_path: str | None = None
         self.known_session_scripts: set[str] = set()
         self._active_tool_mode = "full"
         self._verify_entered_play = False
+        self._suppress_text = False
+        self._turn_mutation_count = 0
 
     @staticmethod
     def _display(callback, *args):
@@ -212,6 +223,8 @@ class Agent:
             return
 
     def _emit_text(self, chunk: str):
+        if self._suppress_text:
+            return
         self._display(self._on_text_callback, chunk)
 
     def _log(self, event: str, **payload):
@@ -349,7 +362,9 @@ class Agent:
         rejected by :class:`UnityTools`.
         """
         self.last_run_log_paths = None
+        self.last_verification_receipt_path = None
         self._run_log_error = None
+        self._turn_mutation_count = 0
         previous_tool_mode = getattr(self.tools, "tool_mode", "full")
         active_tool_mode = str(tool_mode or previous_tool_mode or "full").lower()
         self._active_tool_mode = active_tool_mode
@@ -359,6 +374,8 @@ class Agent:
         effective_user_text = user_text
         if active_tool_mode == "verify":
             effective_user_text = VERIFY_MODE_PROMPT + "\n[검증 요청]\n" + user_text
+        spec = VerificationSpec.from_request(user_text, force=active_tool_mode == "verify")
+        managed_verification = self.enable_verification and spec.enabled
         if self.enable_logging:
             try:
                 self._run_log = RunLogger(config.RUN_LOG_DIR, user_text, self.model)
@@ -370,6 +387,8 @@ class Agent:
                     milestone_max_iters=config.MILESTONE_MAX_ITERS,
                     plan_total_iters=config.PLAN_MAX_TOTAL_ITERS,
                     tool_mode=active_tool_mode,
+                    verification_orchestration=managed_verification,
+                    verification_spec=spec.__dict__,
                 )
             except OSError as e:
                 self._run_log = None
@@ -380,38 +399,24 @@ class Agent:
 
         outcome = "completed"
         success = False
+        build_success: bool | None = None
+        started = time.monotonic()
         try:
-            plan = None
-            if active_tool_mode != "verify" and config.PLANNER != "off" and (
-                config.PLANNER == "always" or planner.looks_large(effective_user_text)
-            ):
-                self.on_warn("큰 요청으로 판단해 실행 계획을 먼저 세웁니다...")
-                plan = await self._make_plan(effective_user_text)
-            if plan is None:
-                self._log("execution_mode", mode="single", tool_mode=active_tool_mode)
-                success = await self._run_single(effective_user_text)
+            self._suppress_text = managed_verification
+            if active_tool_mode == "verify" and managed_verification:
+                build_success = None
             else:
-                self._log(
-                    "execution_mode",
-                    mode="plan",
-                    milestones=[{
-                        "id": m.id,
-                        "title": m.title,
-                        "goal": m.goal,
-                        "deliverables": m.deliverables,
-                        "verify": m.verify,
-                        "max_iters": m.max_iters,
-                    } for m in plan.milestones],
+                build_success = await self._execute_requested_work(
+                    effective_user_text, active_tool_mode
                 )
-                self.on_warn(
-                    "실행 계획: "
-                    + " → ".join(
-                        f"{m.id} {m.title} (verify: {','.join(m.verify) or 'none'})"
-                        for m in plan.milestones
-                    )
+            if managed_verification:
+                success = await self._run_verification_orchestration(
+                    spec, build_success, started, allow_fix=active_tool_mode != "verify"
                 )
-                success = await self._run_plan(effective_user_text, plan)
-            outcome = "completed" if success else "failed"
+                outcome = "verified" if success else "failed"
+            else:
+                success = bool(build_success)
+                outcome = "completed" if success else "failed"
             return success
         except BaseException as e:
             if isinstance(e, (KeyboardInterrupt, asyncio.CancelledError)):
@@ -459,10 +464,315 @@ class Agent:
                 self.tools.set_tool_mode(previous_tool_mode)
             self._active_tool_mode = previous_tool_mode
             self._verify_entered_play = False
+            self._suppress_text = False
+
+    async def _execute_requested_work(self, user_text: str, active_tool_mode: str) -> bool:
+        """Run the v1.8 builder. Its prose is provisional under v1.9."""
+        plan = None
+        if active_tool_mode != "verify" and config.PLANNER != "off" and (
+            config.PLANNER == "always" or planner.looks_large(user_text)
+        ):
+            self.on_warn("큰 요청으로 판단해 실행 계획을 먼저 세웁니다...")
+            plan = await self._make_plan(user_text)
+        if plan is None:
+            self._log("execution_mode", mode="single", tool_mode=active_tool_mode)
+            return await self._run_single(user_text)
+        self._log(
+            "execution_mode",
+            mode="plan",
+            milestones=[{
+                "id": m.id,
+                "title": m.title,
+                "goal": m.goal,
+                "deliverables": m.deliverables,
+                "verify": m.verify,
+                "max_iters": m.max_iters,
+            } for m in plan.milestones],
+        )
+        self.on_warn(
+            "실행 계획: "
+            + " → ".join(
+                f"{m.id} {m.title} (verify: {','.join(m.verify) or 'none'})"
+                for m in plan.milestones
+            )
+        )
+        return await self._run_plan(user_text, plan)
 
     async def _make_plan(self, user_text: str):
         """플래닝 호출 래퍼 (테스트에서 오버라이드 지점)."""
         return await planner.make_plan(self.client, self.model, user_text, self.on_warn)
+
+    async def _verification_call(self, contract: VerificationContract,
+                                 name: str, args: dict) -> str:
+        """Execute one host-selected verification call and record its evidence."""
+        args, violation = contract.prepare_call(name, args)
+        if violation:
+            result = json.dumps({"status": "error", "error": violation}, ensure_ascii=False)
+            self.on_warn(violation)
+        else:
+            try:
+                result = await self.tools.call(name, args)
+                # UnityTools intentionally truncates large results before they
+                # reach a model/UI. Host verification must parse the retained
+                # full response or a long console stack could become invalid
+                # JSON and silently erase real error evidence.
+                evidence_result = getattr(self.tools, "last_raw_result", "") or result
+                contract.observe(name, args, evidence_result)
+            except Exception as error:
+                detail = f"{name}:{type(error).__name__}:{error}"
+                contract.tool_errors.append(detail)
+                result = json.dumps(
+                    {"status": "error", "error": detail}, ensure_ascii=False
+                )
+                self._log("verification_tool_error", name=name, error=detail)
+        self.on_tool(name, args, result)
+        return result
+
+    async def _collect_verification(self, spec: VerificationSpec) -> VerificationContract:
+        """Collect a fixed evidence sequence without giving a model completion authority."""
+        contract = VerificationContract(spec, config.UNITY_PROJECT_DIR)
+        if hasattr(self.tools, "set_tool_mode"):
+            self.tools.set_tool_mode("verify")
+        self._active_tool_mode = "verify"
+        self._verify_entered_play = False
+        self._log("verification_started", checklist=spec.checklist())
+
+        async def confirm_play_active() -> bool:
+            """The play command acknowledgement is provisional; sample actual state."""
+            await self._verification_call(contract, "unity_get_state", {})
+            return contract.playing
+
+        async def measure_motion(label: str, key: str, boost: bool = False) -> bool:
+            if not await confirm_play_active():
+                return False
+            await self._verification_call(
+                contract, "unity_get_gameobject", {"target": "Player"}
+            )
+            if spec.require_camera_follow or label in {"d", "a", "boost_normal", "boost_shift"}:
+                await self._verification_call(
+                    contract, "unity_get_gameobject", {"target": "Main Camera"}
+                )
+            if not contract.begin_motion(label):
+                return False
+            await self._verification_call(contract, "unity_send_key", {
+                "key": key, "action": "press",
+            })
+            if boost:
+                await self._verification_call(contract, "unity_send_key", {
+                    "key": "leftShift", "action": "press",
+                })
+            await self._verification_call(contract, "unity_wait", {"seconds": 0.5})
+            if boost:
+                await self._verification_call(contract, "unity_send_key", {
+                    "key": "leftShift", "action": "release",
+                })
+            await self._verification_call(contract, "unity_send_key", {
+                "key": key, "action": "release",
+            })
+            await self._verification_call(contract, "unity_wait", {"seconds": 0.5})
+            await self._verification_call(
+                contract, "unity_get_gameobject", {"target": "Player"}
+            )
+            if spec.require_camera_follow or label in {"d", "a", "boost_normal", "boost_shift"}:
+                await self._verification_call(
+                    contract, "unity_get_gameobject", {"target": "Main Camera"}
+                )
+            contract.end_motion(label)
+            return True
+
+        try:
+            await self._verification_call(contract, "unity_get_state", {})
+            await self._verification_call(
+                contract, "unity_read_console", {"types": "error,exception"}
+            )
+            for target in spec.required_components:
+                await self._verification_call(
+                    contract, "unity_get_gameobject", {"target": target}
+                )
+
+            if spec.require_gameplay:
+                result = await self._verification_call(
+                    contract, "unity_play_mode", {"action": "play"}
+                )
+                decoded = json.JSONDecoder().raw_decode(str(result).lstrip())[0]
+                self._verify_entered_play = (
+                    decoded.get("status") == "ok" and contract.playing
+                )
+                await self._verification_call(contract, "unity_wait", {"seconds": 0.7})
+                if await confirm_play_active():
+                    await self._verification_call(
+                        contract, "unity_read_console", {"types": "error,exception"}
+                    )
+                    if spec.require_level_marker:
+                        await self._verification_call(
+                            contract, "unity_read_console", {"types": "log"}
+                        )
+                if spec.require_movement:
+                    await measure_motion("rightArrow", "rightArrow")
+                if spec.require_bidirectional:
+                    await measure_motion("d", "d")
+                    await measure_motion("a", "a")
+                if spec.require_boost:
+                    await measure_motion("boost_normal", "d")
+                    await measure_motion("boost_shift", "d", boost=True)
+                if spec.require_jump and await confirm_play_active():
+                    # Capture two post-input samples so a brief apex is not
+                    # mistaken for a failed jump.
+                    await self._verification_call(
+                        contract, "unity_get_gameobject", {"target": "Player"}
+                    )
+                    await self._verification_call(contract, "unity_send_key", {
+                        "key": "space", "action": "tap", "duration": 0.08,
+                    })
+                    await self._verification_call(contract, "unity_wait", {"seconds": 0.5})
+                    await self._verification_call(
+                        contract, "unity_get_gameobject", {"target": "Player"}
+                    )
+                    await self._verification_call(contract, "unity_wait", {"seconds": 0.5})
+                    await self._verification_call(
+                        contract, "unity_get_gameobject", {"target": "Player"}
+                    )
+                if spec.require_screenshot and contract.playing:
+                    stamp = time.strftime("%Y%m%d_%H%M%S")
+                    await self._verification_call(contract, "unity_screenshot", {
+                        "view": "game", "width": 1280, "height": 720,
+                        "output_path": f"Assets/Screenshots/verification/v19_{stamp}.png",
+                    })
+                if spec.require_movement or spec.require_jump or spec.require_boost:
+                    await self._verification_call(contract, "unity_get_input_state", {})
+        except (TypeError, ValueError, AttributeError, KeyError) as error:
+            self._log(
+                "verification_collection_error",
+                exception_type=type(error).__name__, message=str(error),
+            )
+        finally:
+            if self._verify_entered_play or contract.playing:
+                try:
+                    await self._verification_call(
+                        contract, "unity_play_mode", {"action": "stop"}
+                    )
+                finally:
+                    self._verify_entered_play = False
+            # A final state read makes the stopped/saved claim measurable rather
+            # than inferring it from the stop command's acknowledgement.
+            await self._verification_call(contract, "unity_get_state", {})
+
+        failures = contract.failures()
+        self._log(
+            "verification_finished",
+            outcome="passed" if not failures else "failed",
+            failures=failures,
+            evidence=contract.evidence(),
+        )
+        return contract
+
+    async def _run_verification_orchestration(
+        self, spec: VerificationSpec, build_success: bool | None,
+        started: float, allow_fix: bool,
+    ) -> bool:
+        """Verify, repair only failed checks in fresh contexts, then reverify."""
+        attempts: list[dict] = []
+        contract = await self._collect_verification(spec)
+        failures = contract.failures()
+        if build_success is not None and self._turn_mutation_count == 0:
+            failures.append("builder_produced_no_mutation_evidence")
+        attempts.append({
+            "phase": "verify", "attempt": 1,
+            "failures": failures, "evidence": contract.evidence(),
+        })
+        previous_fingerprint = tuple(sorted(failures))
+        stagnant = 0
+
+        for cycle in range(1, config.FIX_MAX_CYCLES + 1):
+            if not failures or not allow_fix:
+                break
+            if time.monotonic() - started >= config.TASK_TIMEOUT_SECONDS:
+                failures.append("task_time_budget_exhausted")
+                break
+            self.on_warn(
+                f"독립 검증 미통과 {len(failures)}건 — 실패 항목 자동 수정 "
+                f"{cycle}/{config.FIX_MAX_CYCLES}"
+            )
+            if hasattr(self.tools, "set_tool_mode"):
+                self.tools.set_tool_mode("full")
+            self._active_tool_mode = "full"
+            evidence = contract.evidence()
+            # Host evidence may identify an exact existing script even when the
+            # original natural-language request did not name its path. Scope
+            # automatic repair to only those measured components/stack traces.
+            repair_scope = [spec.request, json.dumps(evidence, ensure_ascii=False, default=str)]
+            for component_types in evidence.get("components", {}).values():
+                for component_type in component_types:
+                    class_name = str(component_type).rsplit(".", 1)[-1]
+                    candidate = f"Assets/Scripts/{class_name}.cs"
+                    if os.path.exists(os.path.join(config.UNITY_PROJECT_DIR, candidate)):
+                        repair_scope.append(candidate)
+            fix_contract = TaskContract.from_request(
+                "\n".join(repair_scope), self.known_session_scripts
+            )
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": fix_prompt(spec, failures, evidence)},
+            ]
+            remaining = max(0.001, config.TASK_TIMEOUT_SECONDS - (time.monotonic() - started))
+            try:
+                fix_ok, fix_note, fix_iters = await asyncio.wait_for(
+                    self._react_loop(messages, fix_contract, config.FIX_MAX_ITERS),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                failures.append("task_time_budget_exhausted")
+                self._log("verification_fix_timeout", cycle=cycle, timeout=remaining)
+                break
+            self._log(
+                "verification_fix_finished", cycle=cycle, model_loop_ok=fix_ok,
+                note=fix_note, iterations=fix_iters,
+            )
+
+            contract = await self._collect_verification(spec)
+            failures = contract.failures()
+            if self._turn_mutation_count == 0:
+                failures.append("builder_produced_no_mutation_evidence")
+            attempts.append({
+                "phase": "reverify", "attempt": cycle + 1,
+                "failures": failures, "evidence": contract.evidence(),
+            })
+            fingerprint = tuple(sorted(failures))
+            if fingerprint == previous_fingerprint:
+                stagnant += 1
+                if config.NO_PROGRESS_LIMIT and stagnant >= config.NO_PROGRESS_LIMIT:
+                    failures.append("no_verification_progress")
+                    break
+            else:
+                stagnant = 0
+            previous_fingerprint = fingerprint
+
+        success = not failures
+        status = "verified" if success else "failed"
+        try:
+            receipt = write_receipt(
+                config.VERIFICATION_RECEIPT_DIR, spec, status, contract.evidence(),
+                failures, attempts, time.monotonic() - started, build_success,
+            )
+            self.last_verification_receipt_path = receipt
+            self._log("verification_receipt", path=receipt, status=status)
+        except OSError as error:
+            receipt = None
+            self.on_warn(f"검증 영수증 저장 실패: {type(error).__name__}: {error}")
+
+        if success:
+            report = "\n✅ 호스트 독립 검증 통과 — 실제 Unity 증거로 완료를 판정했습니다."
+        else:
+            report = (
+                "\n❌ 완료로 판정하지 않았습니다. 미통과: "
+                + ", ".join(failures)
+            )
+        if receipt:
+            report += f"\n검증 영수증: {receipt}"
+        report += "\n"
+        self._display(self._on_text_callback, report)
+        self.history.append({"role": "assistant", "content": report.strip()})
+        return success
 
     async def _react_loop(self, messages: list[dict], contract: TaskContract,
                           max_iters: int, ledger=None) -> tuple[bool, str, int]:
@@ -518,6 +828,13 @@ class Agent:
                         except (TypeError, ValueError, AttributeError):
                             pass
                     contract.observe(name, args, result)
+                    if name in MUTATION_TOOLS:
+                        try:
+                            response, _ = json.JSONDecoder().raw_decode(result.lstrip())
+                            if response.get("status") == "ok":
+                                self._turn_mutation_count += 1
+                        except (TypeError, ValueError, AttributeError):
+                            pass
                     if ledger is not None:
                         ledger.observe(name, args, result)
                     self.known_session_scripts = set(contract.session_scripts)

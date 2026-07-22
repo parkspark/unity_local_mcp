@@ -25,6 +25,7 @@ console = Console()
 HELP = """\
 명령: /reset 대화 초기화 · /tools 도구 목록 · /model <이름> 모델 변경
       /last 마지막 도구 결과(절단 전) · /log 마지막 실행 로그 경로
+      /receipt 마지막 호스트 검증 영수증
       /verify <요청> 쓰기 도구를 차단한 검증 전용 실행
       /look [질문] 스크린샷 분석(--vision) · /quit 종료"""
 
@@ -185,6 +186,15 @@ async def main():
                         console.print("[dim](아직 저장된 실행 로그가 없습니다)[/dim]")
                     if ut.last_audit_log_path:
                         console.print(f"[dim]MCP 감사 로그: {ut.last_audit_log_path}[/dim]")
+                    if agent.last_verification_receipt_path:
+                        console.print(
+                            f"[dim]검증 영수증: {agent.last_verification_receipt_path}[/dim]"
+                        )
+                elif cmd == "/receipt":
+                    if agent.last_verification_receipt_path:
+                        console.print(agent.last_verification_receipt_path)
+                    else:
+                        console.print("[dim](아직 저장된 검증 영수증이 없습니다)[/dim]")
                 elif cmd == "/verify":
                     if not rest.strip():
                         console.print("[yellow]사용법: /verify <검증할 내용>[/yellow]")

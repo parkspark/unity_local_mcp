@@ -25,6 +25,7 @@ class LoggedScriptedAgent(Agent):
             lambda _name, _args, _result: None,
             lambda _message: None,
             enable_logging=enable_logging,
+            enable_verification=False,
         )
         self.turns = iter(turns)
 

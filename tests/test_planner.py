@@ -30,6 +30,16 @@ class LooksLargeTests(unittest.TestCase):
 
 
 class ValidatePlanTests(unittest.TestCase):
+    def test_unrequested_level_milestones_are_pruned_from_mvp_plan(self):
+        plan = planner.Plan(request="", milestones=[
+            planner.Milestone("m1", "스크립트", "Player 이동 스크립트 작성"),
+            planner.Milestone("m2", "레벨 JSON", "level0.json부터 level2.json 작성",
+                              deliverables=["Assets/StreamingAssets/Levels/level0.json"]),
+            planner.Milestone("m3", "검증", "단일 씬 Play Mode 검증"),
+        ])
+        pruned = planner._prune_unrequested_level_system(plan, "새 씬에 2.5D 플랫포머 MVP", lambda _m: None)
+        self.assertEqual([m.title for m in pruned.milestones], ["스크립트", "검증"])
+
     def test_normalises_ids_and_paths(self):
         plan = planner.validate_plan({
             "mode": "plan",

@@ -18,6 +18,16 @@ import config
 _LEVEL_COUNT = re.compile(r"(레벨|스테이지|level|stage)\s*\d|\d\s*(개의?\s*)?(레벨|스테이지|levels?|stages?)", re.I)
 _GENRE = re.compile(r"플랫포머|플랫폼\s*게임|슈팅|퍼즐|테트리스|소코반|rpg|로그라이크|platformer|shooter|puzzle|tetris|sokoban|게임", re.I)
 _BUILD_VERB = re.compile(r"만들|구현|제작|개발|create|build|implement|make", re.I)
+_EXPLICIT_LEVEL_SYSTEM = re.compile(
+    r"(레벨|스테이지|level|stage)\s*\d|\d\s*(개의?\s*)?(레벨|스테이지|levels?|stages?)"
+    r"|level\s*loader|데이터\s*주도|data[- ]driven|level\s*json|레벨\s*json",
+    re.I,
+)
+_LEVEL_MILESTONE = re.compile(
+    r"level(loader|data)?|레벨\s*(로더|데이터|json)|스테이지\s*(로더|데이터|json)|"
+    r"unity_(install_level_loader|write_level)|StreamingAssets/Levels/|\.json",
+    re.I,
+)
 
 
 def looks_large(request: str) -> bool:
@@ -33,6 +43,25 @@ def looks_large(request: str) -> bool:
     if len(request) > 200 and _BUILD_VERB.search(request):
         return True
     return False
+
+
+def _prune_unrequested_level_system(plan: "Plan", request: str, on_warn) -> "Plan | None":
+    """Do not let a generic MVP platformer turn into an invented level-loader project."""
+    if _EXPLICIT_LEVEL_SYSTEM.search(request):
+        return plan
+    kept = []
+    removed = 0
+    for milestone in plan.milestones:
+        text = " ".join([milestone.title, milestone.goal, *milestone.deliverables])
+        if _LEVEL_MILESTONE.search(text):
+            removed += 1
+            continue
+        kept.append(milestone)
+    if removed:
+        on_warn(f"요청에 없는 데이터 주도 레벨 단계 {removed}개를 계획에서 제거했습니다.")
+    if len(kept) < 2:
+        return None
+    return Plan(request=plan.request, milestones=kept)
 
 
 # ------------------------------------------------------------------ 데이터
@@ -91,6 +120,12 @@ Decide "mode":
 - "single": the request is one small task (create an object, tweak a property, a question).
 - "plan": the request builds something with multiple parts (a game, levels, several systems).
 
+Scope rule:
+- Do not invent stages, level JSON files, or LevelLoader for a generic MVP or a
+  single-scene platformer. Add the data-driven level system only when the user
+  explicitly asks for multiple levels/stages, level JSON, LevelLoader, or a
+  data-driven level workflow. The host removes accidental level milestones too.
+
 If mode is "plan", write 2-6 milestones. Rules for each milestone:
 - "goal": a self-contained instruction the executor can follow without reading the other milestones. Write it in the user's language. Be specific about file paths and object names.
 - "deliverables": project-relative Assets/... file paths this milestone must create (scripts .cs, scenes .unity, levels .json). Empty list if none.
@@ -100,7 +135,10 @@ Environment facts (do not contradict):
 - Data-driven levels: install the canonical loader with unity_install_level_loader (do NOT write a custom loader), then write levels as JSON with unity_write_level to Assets/StreamingAssets/Levels/levelN.json. The player object must be named "Player".
 - The loader builds a 3D world. Player movement must use Rigidbody and 3D Collider/Collision APIs, never Rigidbody2D or other 2D physics APIs.
 - Scripts go under Assets/Scripts/, scenes under Assets/Scenes/.
-- A good split for "a platformer with 3 levels": ① install level loader + write player movement script + compile check ② create scene, LevelLoader object, Player, camera, save ③ write level1-3 JSON files ④ play + simulated input verification (+ screenshot if asked).
+- A good split for "a platformer with 3 levels": ① install the canonical
+  level loader + write player movement script + compile check ② create scene,
+  LevelLoader object, Player, camera, save ③ write level1-3 JSON files ④ play
+  + simulated input verification (+ screenshot if asked).
 """
 
 
@@ -186,7 +224,7 @@ async def make_plan(client, model: str, request: str, on_warn=lambda m: None) ->
             plan = validate_plan(data)
             if plan is not None:
                 plan.request = request
-                return plan
+                return _prune_unrequested_level_system(plan, request, on_warn)
         if attempt == 0:
             on_warn("계획 JSON이 유효하지 않아 한 번 더 시도합니다.")
     on_warn("계획을 만들지 못했습니다 — 단일 루프로 진행합니다.")
