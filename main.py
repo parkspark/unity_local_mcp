@@ -25,6 +25,7 @@ console = Console()
 HELP = """\
 명령: /reset 대화 초기화 · /tools 도구 목록 · /model <이름> 모델 변경
       /last 마지막 도구 결과(절단 전) · /log 마지막 실행 로그 경로
+      /verify <요청> 쓰기 도구를 차단한 검증 전용 실행
       /look [질문] 스크린샷 분석(--vision) · /quit 종료"""
 
 
@@ -125,6 +126,10 @@ async def main():
             console.print(f"[yellow]{escape(ping)}[/yellow]")
 
         console.print(HELP)
+        if ut.last_audit_log_path:
+            console.print(f"[dim]MCP 감사 로그: {ut.last_audit_log_path}[/dim]")
+        elif ut.audit_log_error:
+            console.print(f"[yellow]MCP 감사 로그를 시작하지 못했습니다: {escape(ut.audit_log_error)}[/yellow]")
         try:
             session: PromptSession | None = PromptSession()
         except Exception:
@@ -178,6 +183,24 @@ async def main():
                         console.print(f"[dim]JSONL 로그: {jsonl_path}[/dim]")
                     else:
                         console.print("[dim](아직 저장된 실행 로그가 없습니다)[/dim]")
+                    if ut.last_audit_log_path:
+                        console.print(f"[dim]MCP 감사 로그: {ut.last_audit_log_path}[/dim]")
+                elif cmd == "/verify":
+                    if not rest.strip():
+                        console.print("[yellow]사용법: /verify <검증할 내용>[/yellow]")
+                        continue
+                    try:
+                        await agent.run_turn(rest.strip(), tool_mode="verify")
+                        print()
+                    except KeyboardInterrupt:
+                        console.print("\n[yellow]검증을 중단했습니다.[/yellow]")
+                    except Exception as e:
+                        console.print(f"\n[red]{type(e).__name__}: {escape(str(e))}[/red]")
+                    finally:
+                        if agent.last_run_log_paths:
+                            text_path, jsonl_path = agent.last_run_log_paths
+                            console.print(f"[dim]실행 로그: {text_path}[/dim]")
+                            console.print(f"[dim]JSONL: {jsonl_path}[/dim]")
                 elif cmd == "/look":
                     await cli.look(agent, rest.strip())
                 else:
@@ -205,8 +228,10 @@ async def main():
 
 
 if __name__ == "__main__":
-    if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
-        sys.stdout.reconfigure(encoding="utf-8")
-    if sys.stdin.encoding and sys.stdin.encoding.lower() != "utf-8":
-        sys.stdin.reconfigure(encoding="utf-8")
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stdin, "reconfigure"):
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     asyncio.run(main())

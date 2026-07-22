@@ -7,7 +7,7 @@ from unittest import mock
 
 import config
 import planner
-from agent import Agent
+from agent import Agent, _milestone_prompt
 
 
 class FakeTools:
@@ -82,6 +82,27 @@ def _plan(milestones):
 
 
 class PlanExecutionTests(unittest.TestCase):
+    def test_retry_prompt_reuses_partial_successes(self):
+        plan = _plan([
+            planner.Milestone(
+                id="m1", title="게임 구성", goal="스크립트와 씬 구성",
+                deliverables=["Assets/Scripts/Foo.cs"],
+            ),
+        ])
+        plan.request = "게임을 만들어 줘"
+        ledger = planner.ArtifactLedger()
+        ledger.observe(
+            "unity_write_script",
+            {"path": "Assets/Scripts/Foo.cs"},
+            '{"status":"ok","result":{"written":"Assets/Scripts/Foo.cs"}}',
+        )
+
+        prompt = _milestone_prompt(plan, 0, ledger, "tool-call iteration limit reached")
+
+        self.assertIn("Assets/Scripts/Foo.cs", prompt)
+        self.assertIn("이미 성공한 결과", prompt)
+        self.assertIn("이전 검증의 미완료 부분부터 이어서", prompt)
+
     def test_two_milestones_run_with_ledger_handoff(self):
         with tempfile.TemporaryDirectory() as tmp:
             os.makedirs(os.path.join(tmp, "Assets", "Scripts"))

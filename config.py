@@ -70,3 +70,17 @@ RUN_LOG_DIR = os.path.abspath(os.environ.get(
     "UNITY_AGENT_RUN_LOG_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "runs"),
 ))
+
+# ---- v1.8.1: MCP 감사 로그 / 검증 전용 모드 ----
+
+# Agent를 거치지 않는 직접 UnityTools.call()까지 빠짐없이 JSONL로 기록한다.
+MCP_AUDIT_LOGS = os.environ.get("UNITY_MCP_AUDIT_LOGS", "1") != "0"
+MCP_AUDIT_LOG_DIR = os.path.abspath(os.environ.get(
+    "UNITY_MCP_AUDIT_LOG_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "mcp"),
+))
+
+# full: 모든 도구, verify: 조회·플레이·입력·스크린샷 도구만 노출/허용.
+TOOL_MODE = os.environ.get("UNITY_AGENT_TOOL_MODE", "full").strip().lower()
+if TOOL_MODE not in {"full", "verify"}:
+    TOOL_MODE = "full"

@@ -27,12 +27,14 @@ Rules:
 - Tool arguments are STRICT JSON. Numbers never carry C# suffixes: write 0.9, NOT 0.9f. Vectors are real JSON arrays like [0.9, 0.9, 0.9], never the string "[0.9f, 0.9f, 0.9f]".
 - NEVER create similar objects one-by-one with repeated unity_create_gameobject calls. For 3+ similar objects call unity_create_gameobjects ONCE with a list of specs. For large or procedural layouts (grids, boards, 20+ objects — e.g. a 10x20 board) do not create them with tools at all: write a MonoBehaviour that builds them in Awake()/Start() with GameObject.CreatePrimitive or Instantiate in a loop, attach it to one empty GameObject, and let the game generate the layout itself.
 - After unity_play_mode or unity_refresh_assets, Unity reloads its domain: if the NEXT call fails with a connection error, retry it once before reporting failure.
+- Scene/component/material edit tools are edit-mode only. Stop play mode before modifying anything; the bridge rejects these calls before any side effect.
 - Never fabricate tool results. If the Unity bridge is unreachable, say so and tell the user to check the Unity Editor.
-- unity_screenshot saves a PNG and returns its path. You cannot see images — report the path to the user and ask them to look at it.
+- unity_screenshot creates missing output directories, saves a PNG and returns its path. You cannot see images — report the path to the user and ask them to look at it.
 - Prefer few, targeted tool calls. Do not dump the full hierarchy unless the user asks for it.
 
 Writing C# scripts:
 - New behaviour script: unity_write_script → unity_refresh_assets (the host waits for compilation) → unity_read_console types="error" → if no errors, unity_add_component with the class name.
+- unity_add_component is idempotent by default. If a duplicate already exists it returns alreadyPresent=true. Use unity_remove_component remove_all=true to clean accidental duplicates; never delete and recreate the whole GameObject just to remove one component.
 - If there are compile errors, fix the script with unity_write_script and repeat.
 - The C# class name MUST match the file name. Before modifying an existing script, read it first with unity_read_script.
 - ALWAYS place scripts under Assets/Scripts/. Before creating a new script, check it does not already exist elsewhere (unity_list_assets filter "t:Script"). Two files defining the same class break ALL compilation in the project.
@@ -49,6 +51,7 @@ Data-driven levels (games with stages/levels):
 
 Input simulation (gameplay verification):
 - unity_send_key simulates a keyboard key during play mode only. action "tap" presses and auto-releases after `duration` seconds; "press" holds until "release".
+- When exact key-release evidence matters, call unity_get_input_state after a wait and require both held and pendingReleases to be empty.
 - To verify movement: unity_get_gameobject Player (note position) → unity_send_key key="rightArrow" action="press" → unity_wait 1 → unity_send_key key="rightArrow" action="release" → unity_get_gameobject Player again and compare positions.
 - Unchanged before/after positions are a failed verification: fix the Player component/physics/input implementation, then repeat the measurement.
 - Combos: press one key, tap another, then release (e.g. hold rightArrow, tap space to jump).
@@ -62,6 +65,14 @@ Execution policy:
 - Do not use unity_execute_menu_item; native dialogs are intentionally blocked.
 - Existing scripts are out of scope unless the user explicitly names their Assets/... path.
 - The host enforces script compilation checks after writes and a unity_wait + runtime error check after play mode. Complete those checks before claiming success.
+"""
+
+VERIFY_MODE_PROMPT = """\
+[호스트 강제 검증 전용 모드]
+현재 상태를 검사하고 실제 증거를 수집하는 일만 수행하라. 파일, 씬, GameObject,
+컴포넌트, 머티리얼을 생성·수정·삭제하지 마라. 편집 도구는 스키마에서 숨겨지고
+호스트에서도 차단된다. 기존 결과가 요구와 다르면 고치려 하지 말고 차이와 증거를
+보고하라. 플레이 모드에 들어갔다면 검증 후 반드시 종료하라.
 """
 
 _LEAKED_TOOLCALL = re.compile(r"<(function|tool_call)[=\s>]")
@@ -149,6 +160,11 @@ def _milestone_prompt(plan: "planner.Plan", idx: int, ledger: "planner.ArtifactL
     ]
     if prev_error:
         parts.append(f"[이전 시도 실패 원인] {prev_error}")
+        parts.append(
+            "[재시도 규칙] 위 산출물 대장에 있는 파일·씬·오브젝트는 이미 성공한 결과다. "
+            "먼저 조회해서 재사용하고, 누락 또는 실제 오류가 확인되지 않은 산출물을 다시 "
+            "설치·생성·덮어쓰지 마라. 이전 검증의 미완료 부분부터 이어서 수행하라."
+        )
     parts.append(f"[현재 마일스톤 {m.id}] {m.goal}")
     if m.deliverables:
         parts.append("이 마일스톤이 만들어야 하는 파일: " + ", ".join(m.deliverables))
@@ -167,11 +183,12 @@ class Agent:
         self.model = config.MODEL
         self.history: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
         # 표시 콜백: on_text(스트리밍 텍스트 조각), on_tool(이름, 인자, 결과), on_warn(경고문)
-        self.on_text = on_text
+        self._on_text_callback = on_text
         self._on_tool_callback = on_tool
         self._on_warn_callback = on_warn
         # on_milestone(idx, total, title): 플랜 실행 진행 표시 (없으면 무시)
         self._on_milestone_callback = on_milestone or (lambda idx, total, title: None)
+        self.on_text = self._emit_text
         self.on_tool = self._emit_tool
         self.on_warn = self._emit_warn
         self.on_milestone = self._emit_milestone
@@ -180,6 +197,22 @@ class Agent:
         self._run_log_error: str | None = None
         self.last_run_log_paths: tuple[str, str] | None = None
         self.known_session_scripts: set[str] = set()
+        self._active_tool_mode = "full"
+        self._verify_entered_play = False
+
+    @staticmethod
+    def _display(callback, *args):
+        """UI/console encoding failures must not abort a Unity operation."""
+        try:
+            callback(*args)
+        except UnicodeError:
+            # The complete content still exists in the UTF-8 execution/audit log.
+            # Suppressing a broken legacy-console render is safer than retrying a
+            # callback that may have emitted partial output already.
+            return
+
+    def _emit_text(self, chunk: str):
+        self._display(self._on_text_callback, chunk)
 
     def _log(self, event: str, **payload):
         if self._run_log is None:
@@ -191,7 +224,7 @@ class Agent:
             self._run_log.abort()
             self._run_log = None
             try:
-                self._on_warn_callback(
+                self._display(self._on_warn_callback,
                     f"실행 로그 기록이 중단됐습니다({self._run_log_error}). 작업은 계속합니다."
                 )
             except Exception:
@@ -199,15 +232,15 @@ class Agent:
 
     def _emit_tool(self, name: str, args: dict, result: str):
         self._log("tool_result", name=name, arguments=args, result=result)
-        self._on_tool_callback(name, args, result)
+        self._display(self._on_tool_callback, name, args, result)
 
     def _emit_warn(self, message: str):
         self._log("warning", message=message)
-        self._on_warn_callback(message)
+        self._display(self._on_warn_callback, message)
 
     def _emit_milestone(self, idx: int, total: int, title: str):
         self._log("milestone_started", index=idx + 1, total=total, title=title)
-        self._on_milestone_callback(idx, total, title)
+        self._display(self._on_milestone_callback, idx, total, title)
 
     def reset(self):
         self.history = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -308,10 +341,24 @@ class Agent:
         self._log("vision_result", model=config.VISION_MODEL, content=content, image_path=path)
         return content
 
-    async def run_turn(self, user_text: str):
-        """Execute one request and persist a v1.8 transcript for every outcome."""
+    async def run_turn(self, user_text: str, tool_mode: str | None = None):
+        """Execute one request and persist a transcript for every outcome.
+
+        ``tool_mode="verify"`` is a one-turn, host-enforced read/execute-only
+        boundary.  Tool schemas are filtered and leaked mutation calls are still
+        rejected by :class:`UnityTools`.
+        """
         self.last_run_log_paths = None
         self._run_log_error = None
+        previous_tool_mode = getattr(self.tools, "tool_mode", "full")
+        active_tool_mode = str(tool_mode or previous_tool_mode or "full").lower()
+        self._active_tool_mode = active_tool_mode
+        self._verify_entered_play = False
+        if hasattr(self.tools, "set_tool_mode"):
+            self.tools.set_tool_mode(active_tool_mode)
+        effective_user_text = user_text
+        if active_tool_mode == "verify":
+            effective_user_text = VERIFY_MODE_PROMPT + "\n[검증 요청]\n" + user_text
         if self.enable_logging:
             try:
                 self._run_log = RunLogger(config.RUN_LOG_DIR, user_text, self.model)
@@ -322,11 +369,12 @@ class Agent:
                     max_iters=config.MAX_ITERS,
                     milestone_max_iters=config.MILESTONE_MAX_ITERS,
                     plan_total_iters=config.PLAN_MAX_TOTAL_ITERS,
+                    tool_mode=active_tool_mode,
                 )
             except OSError as e:
                 self._run_log = None
                 self._run_log_error = f"{type(e).__name__}: {e}"
-                self._on_warn_callback(
+                self._display(self._on_warn_callback,
                     f"실행 로그를 시작하지 못했습니다({self._run_log_error}). 작업은 계속합니다."
                 )
 
@@ -334,14 +382,14 @@ class Agent:
         success = False
         try:
             plan = None
-            if config.PLANNER != "off" and (
-                config.PLANNER == "always" or planner.looks_large(user_text)
+            if active_tool_mode != "verify" and config.PLANNER != "off" and (
+                config.PLANNER == "always" or planner.looks_large(effective_user_text)
             ):
                 self.on_warn("큰 요청으로 판단해 실행 계획을 먼저 세웁니다...")
-                plan = await self._make_plan(user_text)
+                plan = await self._make_plan(effective_user_text)
             if plan is None:
-                self._log("execution_mode", mode="single")
-                success = await self._run_single(user_text)
+                self._log("execution_mode", mode="single", tool_mode=active_tool_mode)
+                success = await self._run_single(effective_user_text)
             else:
                 self._log(
                     "execution_mode",
@@ -362,7 +410,7 @@ class Agent:
                         for m in plan.milestones
                     )
                 )
-                success = await self._run_plan(user_text, plan)
+                success = await self._run_plan(effective_user_text, plan)
             outcome = "completed" if success else "failed"
             return success
         except BaseException as e:
@@ -378,6 +426,21 @@ class Agent:
             )
             raise
         finally:
+            if active_tool_mode == "verify" and self._verify_entered_play:
+                # A failed/limited verification must not strand Unity in play
+                # mode or leave simulated keys held. Exiting play mode clears the
+                # bridge's held/pending key sets deterministically.
+                try:
+                    cleanup_args = {"action": "stop"}
+                    cleanup_result = await self.tools.call("unity_play_mode", cleanup_args)
+                    self.on_tool("unity_play_mode", cleanup_args, cleanup_result)
+                    self._log("verify_cleanup", action="stop", result=cleanup_result)
+                except BaseException as cleanup_error:
+                    self._log(
+                        "verify_cleanup_error",
+                        exception_type=type(cleanup_error).__name__,
+                        message=str(cleanup_error),
+                    )
             logger = self._run_log
             if logger is not None:
                 try:
@@ -386,12 +449,16 @@ class Agent:
                     self._run_log_error = f"{type(e).__name__}: {e}"
                     logger.abort()
                     try:
-                        self._on_warn_callback(
+                        self._display(self._on_warn_callback,
                             f"실행 로그 종료 기록에 실패했습니다({self._run_log_error})."
                         )
                     except Exception:
                         pass
                 self._run_log = None
+            if hasattr(self.tools, "set_tool_mode"):
+                self.tools.set_tool_mode(previous_tool_mode)
+            self._active_tool_mode = previous_tool_mode
+            self._verify_entered_play = False
 
     async def _make_plan(self, user_text: str):
         """플래닝 호출 래퍼 (테스트에서 오버라이드 지점)."""
@@ -439,6 +506,17 @@ class Agent:
                     self.on_warn(violation)
                 else:
                     result = await self.tools.call(name, args)
+                    if self._active_tool_mode == "verify" and name == "unity_play_mode":
+                        try:
+                            response, _ = json.JSONDecoder().raw_decode(result.lstrip())
+                            if response.get("status") == "ok":
+                                action = str(args.get("action", "")).lower()
+                                if action == "play":
+                                    self._verify_entered_play = True
+                                elif action == "stop":
+                                    self._verify_entered_play = False
+                        except (TypeError, ValueError, AttributeError):
+                            pass
                     contract.observe(name, args, result)
                     if ledger is not None:
                         ledger.observe(name, args, result)

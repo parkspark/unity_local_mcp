@@ -16,6 +16,7 @@ from mcp.client.stdio import stdio_client
 
 import config
 import local_tools
+from audit_logging import ToolAuditLogger
 
 
 _CS_FLOAT_SUFFIX = re.compile(r"(?<=[\d.])[fF]\b")
@@ -113,6 +114,16 @@ _READONLY = {
     "unity_read_console", "unity_list_assets", "unity_screenshot",
 }
 
+# 검증은 씬/파일을 고치지 않는다. 플레이 모드 전환과 입력/스크린샷은
+# 검증 행위이므로 허용하지만, 모든 편집·파일 쓰기 도구는 스키마에서도 숨기고
+# call() 경계에서도 다시 차단한다(누수 tool-call 우회 방지).
+VERIFY_ONLY_TOOLS = {
+    "unity_ping", "unity_get_state", "unity_get_hierarchy", "unity_get_gameobject",
+    "unity_read_console", "unity_list_assets", "unity_screenshot", "unity_play_mode",
+    "unity_send_key", "unity_get_input_state", "unity_wait", "unity_read_script",
+    "unity_read_level",
+}
+
 
 def _truncate(text: str) -> str:
     limit = config.TRUNCATE_CHARS
@@ -129,24 +140,48 @@ class UnityTools:
 
     async def __aenter__(self):
         self._stack = AsyncExitStack()
+        self._audit_log: ToolAuditLogger | None = None
+        self.audit_log_error: str | None = None
+        self.last_audit_log_path: str | None = None
+        if config.MCP_AUDIT_LOGS:
+            try:
+                self._audit_log = ToolAuditLogger(config.MCP_AUDIT_LOG_DIR)
+                self.last_audit_log_path = self._audit_log.path
+            except OSError as e:
+                self.audit_log_error = f"{type(e).__name__}: {e}"
         self._port = _bridge_port() or "8722"  # 서버 프로세스에 넘겨준 포트
         params = _server_params()
         # 서버 stderr("Processing request..." 로그)가 채팅 화면에 섞이지 않게 파일로
         errlog = self._stack.enter_context(
-            open(os.path.join(os.path.dirname(__file__), "mcp_server.log"), "w", encoding="utf-8")
+            open(
+                os.path.join(os.path.dirname(__file__), "mcp_server.log"),
+                "a", encoding="utf-8", buffering=1,
+            )
         )
         read, write = await self._stack.enter_async_context(stdio_client(params, errlog=errlog))
         self.session = await self._stack.enter_async_context(ClientSession(read, write))
         await self.session.initialize()
         self.tools = (await self.session.list_tools()).tools
-        self.ollama_tools = [_to_ollama(t) for t in self.tools] + local_tools.SCHEMAS
+        self._all_ollama_tools = [_to_ollama(t) for t in self.tools] + local_tools.SCHEMAS
         self._schemas = {t.name: t.inputSchema for t in self.tools}
         self._project_dir: str | None = config.UNITY_PROJECT_DIR or None
         self.last_raw_result = ""  # /last 명령용, 절단 전 원본
+        self.tool_mode = "full"
+        self.set_tool_mode(config.TOOL_MODE)
         return self
 
     async def __aexit__(self, *exc):
-        await self._stack.aclose()
+        try:
+            await self._stack.aclose()
+        finally:
+            if self._audit_log is not None:
+                try:
+                    outcome = "error" if exc and exc[0] is not None else "completed"
+                    self._audit_log.close(outcome, logging_error=self.audit_log_error)
+                except OSError as e:
+                    self.audit_log_error = f"{type(e).__name__}: {e}"
+                    self._audit_log.abort()
+                self._audit_log = None
 
     def _dismiss_known_modals(self) -> bool:
         """브리지를 마비시키는 알려진 에디터 모달을 자동 처리. 처리했으면 True."""
@@ -166,13 +201,42 @@ class UnityTools:
         new_port = _bridge_port()
         if not new_port or new_port == self._port:
             return False
+        previous_mode = self.tool_mode
+        if self._audit_log is not None:
+            try:
+                self._audit_log.close("reconnected", next_port=new_port)
+            except OSError:
+                self._audit_log.abort()
+            self._audit_log = None
         await self._stack.aclose()
         await self.__aenter__()
+        self.set_tool_mode(previous_mode)
         return True
 
     @property
     def names(self) -> list[str]:
         return [t["function"]["name"] for t in self.ollama_tools]
+
+    def set_tool_mode(self, mode: str) -> str:
+        mode = str(mode or "full").strip().lower()
+        if mode not in {"full", "verify"}:
+            raise ValueError("tool mode must be 'full' or 'verify'")
+        self.tool_mode = mode
+        if mode == "verify":
+            self.ollama_tools = [
+                tool for tool in self._all_ollama_tools
+                if tool["function"]["name"] in VERIFY_ONLY_TOOLS
+            ]
+        else:
+            self.ollama_tools = list(self._all_ollama_tools)
+        if self._audit_log is not None:
+            try:
+                self._audit_log.event("tool_mode_changed", tool_mode=mode, tools=self.names)
+            except OSError as e:
+                self.audit_log_error = f"{type(e).__name__}: {e}"
+                self._audit_log.abort()
+                self._audit_log = None
+        return mode
 
     async def _resolve_project_dir(self) -> str | None:
         """Unity 프로젝트 경로. 최초 사용 시 unity_ping의 projectPath에서 발견해 캐시."""
@@ -258,7 +322,16 @@ class UnityTools:
             text = f"Tool error: {text}"
         return text
 
-    async def call(self, name: str, args: dict) -> str:
+    async def _call_impl(self, name: str, args: dict) -> str:
+        if self.tool_mode == "verify" and name not in VERIFY_ONLY_TOOLS:
+            return json.dumps({
+                "status": "error",
+                "error": (
+                    f"verification-only mode blocked {name}; only state/query, play, "
+                    "input, wait and screenshot tools are allowed"
+                ),
+            }, ensure_ascii=False)
+
         if name == "unity_wait":
             try:
                 seconds = local_tools.wait_seconds(args)
@@ -316,3 +389,42 @@ class UnityTools:
             text = await self._wait_for_compile(text)
         self.last_raw_result = text
         return _truncate(text)
+
+    async def call(self, name: str, args: dict) -> str:
+        """Execute one tool and audit it even when no Agent is involved."""
+        args = dict(args or {})
+        # _call_impl stores the untruncated response here for /last and audit.
+        # Clear it first so an early policy/unknown-tool return cannot inherit a
+        # previous call's raw result.
+        self.last_raw_result = ""
+        audit = self._audit_log
+        audit_state: tuple[int, float] | None = None
+        if audit is not None:
+            try:
+                audit_state = audit.call_started(name, args, self.tool_mode)
+            except OSError as e:
+                self.audit_log_error = f"{type(e).__name__}: {e}"
+                audit.abort()
+                self._audit_log = None
+                audit = None
+        try:
+            result = await self._call_impl(name, args)
+        except BaseException as e:
+            if audit is not None and audit_state is not None:
+                try:
+                    audit.call_finished(audit_state[0], name, audit_state[1], "", exception=e)
+                except OSError:
+                    audit.abort()
+                    self._audit_log = None
+            raise
+        if audit is not None and audit_state is not None:
+            try:
+                full_result = self.last_raw_result or result
+                audit.call_finished(audit_state[0], name, audit_state[1], full_result)
+            except OSError as e:
+                self.audit_log_error = f"{type(e).__name__}: {e}"
+                audit.abort()
+                self._audit_log = None
+        if not self.last_raw_result:
+            self.last_raw_result = result
+        return result

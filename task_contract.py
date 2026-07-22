@@ -24,7 +24,8 @@ _LOADER_SCRIPT = "Assets/Scripts/LevelLoader.cs"
 _INPUT_SIM_WORDS = ("플레이 검증", "조작", "입력 테스트", "입력 시뮬레이", "keyboard", "send_key", "키 입력")
 _SCENE_MUTATIONS = {
     "unity_create_gameobject", "unity_create_gameobjects", "unity_modify_gameobject",
-    "unity_delete_gameobject", "unity_add_component", "unity_set_component_property",
+    "unity_delete_gameobject", "unity_add_component", "unity_remove_component",
+    "unity_set_component_property",
     "unity_create_material", "unity_create_scene",
 }
 _SCENE_QUERIES = {"unity_get_hierarchy", "unity_get_gameobject"}
