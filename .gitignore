@@ -6,3 +6,4 @@ logs/
 .gemini/
 .idea/
 .vscode/
+.unity-local-agent.json

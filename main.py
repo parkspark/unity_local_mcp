@@ -3,8 +3,10 @@
 사용법:
     uv run main.py            # 채팅 시작
     uv run main.py --vision   # /look 스크린샷 분석 활성화 (qwen2.5vl 필요)
+    uv run main.py --project "D:\\UnityProjects\\MyGame"
 """
 
+import argparse
 import asyncio
 import json
 import os
@@ -19,6 +21,7 @@ from rich.markup import escape
 import config
 from agent import Agent
 from mcp_client import UnityTools
+from project_settings import select_project
 
 console = Console()
 
@@ -103,9 +106,31 @@ class Cli:
         )
 
 
-async def main():
-    vision = "--vision" in sys.argv
-    cli = Cli(vision)
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="로컬 LLM으로 Unity Editor를 제어합니다.")
+    parser.add_argument("--vision", action="store_true", help="스크린샷 비전 분석 활성화")
+    parser.add_argument(
+        "--project",
+        metavar="PATH",
+        help="연결할 Unity 프로젝트 루트(Assets와 ProjectSettings가 있는 폴더)",
+    )
+    return parser.parse_args(argv)
+
+
+async def main(args: argparse.Namespace | None = None):
+    args = args or _parse_args()
+    try:
+        selection = select_project(args.project, config.UNITY_PROJECT_DIR)
+    except ValueError as exc:
+        console.print(f"[bold red]프로젝트 설정 오류:[/bold red] {escape(str(exc))}")
+        return 2
+
+    config.UNITY_PROJECT_DIR = selection.path
+    console.print(f"[dim]Unity 프로젝트 ({selection.source}): {selection.path}[/dim]")
+    if selection.warning:
+        console.print(f"[yellow]경고: {escape(selection.warning)}[/yellow]")
+
+    cli = Cli(args.vision)
 
     async with UnityTools() as ut:
         agent = Agent(ut, cli.on_text, cli.on_tool, cli.on_warn, on_milestone=cli.on_milestone)
@@ -235,6 +260,7 @@ async def main():
                     console.print(f"[dim]JSONL: {jsonl_path}[/dim]")
 
     console.print("[dim]종료합니다.[/dim]")
+    return 0
 
 
 if __name__ == "__main__":
@@ -244,4 +270,4 @@ if __name__ == "__main__":
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     if hasattr(sys.stdin, "reconfigure"):
         sys.stdin.reconfigure(encoding="utf-8", errors="replace")
-    asyncio.run(main())
+    sys.exit(asyncio.run(main()))
