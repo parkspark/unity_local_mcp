@@ -13,10 +13,17 @@ import re
 from dataclasses import dataclass, field
 from typing import Iterable
 
+import config
+
 
 # Stop at the first recognised file extension.  The previous broad expression
 # could consume "Assets/Foo.cs and Assets/Bar.unity" as one invalid path.
-_ASSET_PATH = re.compile(r"Assets/[^\r\n]*?\.(?:cs|unity|prefab|mat|json)\b", re.I)
+# Accept Korean postpositions immediately after a path (e.g. ``.cs를 읽어``).
+# ``\b`` is incorrect here because Python treats Korean letters as word
+# characters, so there is no boundary between the final ``s`` and ``를``.
+_ASSET_PATH = re.compile(
+    r"Assets/[^\r\n]*?\.(?:cs|unity|prefab|mat|json)(?![A-Za-z0-9_.-])", re.I
+)
 _SCRIPT_PREFIX = "Assets/Scripts/"
 _SCENE_PREFIX = "Assets/Scenes/"
 _LEVELS_PREFIX = "Assets/StreamingAssets/Levels/"
@@ -80,6 +87,7 @@ class TaskContract:
     player_position_after: tuple[float, float, float] | None = None
     input_movement_verified: bool = False
     level_load_marker_seen: bool = False
+    active_scene_path: str | None = None
 
     @classmethod
     def from_request(cls, request: str, known_scripts: Iterable[str] = ()) -> "TaskContract":
@@ -127,17 +135,46 @@ class TaskContract:
             args["path"] = path
             if not path.startswith(_SCRIPT_PREFIX) or not path.lower().endswith(".cs"):
                 return args, "Policy blocked script access: scripts must be under Assets/Scripts/ and end in .cs."
-            if name in {"unity_read_script", "unity_delete_script"} and path not in self.user_paths | self.session_scripts:
+            unscoped_existing = path not in self.user_paths | self.session_scripts
+            if name == "unity_delete_script" and unscoped_existing:
                 return args, (
                     f"Policy blocked {name} for {path}: the user did not explicitly scope this existing script. "
                     "Only scripts created in this session or an Assets/... path named by the user may be read or deleted."
                 )
+            if (
+                name == "unity_read_script"
+                and unscoped_existing
+                and not config.ALLOW_UNSCOPED_SCRIPT_READ
+            ):
+                return args, (
+                    f"Policy blocked {name} for {path}: the user did not explicitly scope this existing script. "
+                    "Set UNITY_AGENT_ALLOW_UNSCOPED_SCRIPT_READ=1 to allow read-only inspection; "
+                    "delete access remains scoped."
+                )
 
-        if name == "unity_create_scene":
+        if name in {"unity_create_scene", "unity_open_scene", "unity_save_scene"}:
             path = _normalise_path(args.get("path"))
-            args["path"] = path
+            if path:
+                args["path"] = path
+            if name == "unity_save_scene" and not path:
+                if self.active_scene_path:
+                    path = self.active_scene_path
+                    args["path"] = path
+                else:
+                    return args, (
+                        "Policy blocked pathless scene save: call unity_get_state first so the host "
+                        "can resolve the active Assets/Scenes/*.unity path without a native dialog."
+                    )
             if not path.startswith(_SCENE_PREFIX) or not path.lower().endswith(".unity"):
                 return args, "Policy blocked scene creation: use an Assets/Scenes/*.unity path."
+            scoped_scenes = {
+                item for item in self.user_paths if item.lower().endswith(".unity")
+            }
+            if scoped_scenes and path not in scoped_scenes:
+                return args, (
+                    f"Policy blocked {name} for {path}: canonical scene target is "
+                    + ", ".join(sorted(scoped_scenes))
+                )
 
         if name in {"unity_write_level", "unity_read_level"}:
             path = _normalise_path(args.get("path"))
@@ -159,6 +196,16 @@ class TaskContract:
         """Update milestones only after a successful tool response."""
         if not _successful(result):
             return
+        if name == "unity_get_state":
+            try:
+                data, _ = json.JSONDecoder().raw_decode(str(result).lstrip())
+                path = _normalise_path(
+                    data.get("result", {}).get("activeScene", {}).get("path", "")
+                )
+                if path.startswith(_SCENE_PREFIX) and path.lower().endswith(".unity"):
+                    self.active_scene_path = path
+            except (TypeError, ValueError, AttributeError):
+                pass
         if name in _SCENE_MUTATIONS:
             self.scene_verification_pending = True
             if name != "unity_create_scene":

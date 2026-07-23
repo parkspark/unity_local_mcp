@@ -11,7 +11,9 @@ import ollama
 
 import config
 import planner
+from preflight import inspect_request
 from mcp_client import UnityTools
+from policy_lint import apply_safe_repairs
 from run_logging import RunLogger
 from task_contract import TaskContract
 from verification import (
@@ -47,6 +49,9 @@ Writing C# scripts:
 - Unity 6 renamed APIs — obsolete names trigger a blocking editor dialog. Use `rb.linearVelocity` (NOT `rb.velocity`) and `Object.FindFirstObjectByType<T>()` (NOT `FindObjectOfType<T>()`).
 
 Data-driven levels (games with stages/levels):
+- Use this workflow ONLY when the user explicitly requests LevelLoader, level JSON,
+  data-driven levels, or multiple named levels. A platformer scene containing
+  platforms is not a request for a data-driven level.
 - NEVER hand-build level layouts in the scene or hardcode them in scripts. Install the canonical loader ONCE with unity_install_level_loader → unity_refresh_assets → check errors → add the LevelLoader component to an empty GameObject and set its levelFile property.
 - Write each level as JSON with unity_write_level to Assets/StreamingAssets/Levels/levelN.json. The host validates the schema and reports specific errors — fix and rewrite until it passes.
 - The player object MUST be named exactly "Player" (the loader moves it to player_spawn). Chain levels with "next_level": "level2.json"; the last level uses null.
@@ -174,6 +179,7 @@ def _milestone_prompt(plan: "planner.Plan", idx: int, ledger: "planner.ArtifactL
         parts.append("이 마일스톤이 만들어야 하는 파일: " + ", ".join(m.deliverables))
     parts.append(
         "이 마일스톤만 수행하라. 이후 마일스톤의 작업은 하지 마라. "
+        "이후 마일스톤에서 만들 스크립트나 컴포넌트를 미리 생성·부착하지 마라. "
         "필요한 검증(누락 시 호스트가 알려준다)까지 끝나면 한두 문장으로 보고하고 멈춰라."
     )
     return "\n\n".join(parts)
@@ -354,7 +360,12 @@ class Agent:
         self._log("vision_result", model=config.VISION_MODEL, content=content, image_path=path)
         return content
 
-    async def run_turn(self, user_text: str, tool_mode: str | None = None):
+    async def run_turn(
+        self,
+        user_text: str,
+        tool_mode: str | None = None,
+        repair_existing: bool = False,
+    ):
         """Execute one request and persist a transcript for every outcome.
 
         ``tool_mode="verify"`` is a one-turn, host-enforced read/execute-only
@@ -374,6 +385,9 @@ class Agent:
         effective_user_text = user_text
         if active_tool_mode == "verify":
             effective_user_text = VERIFY_MODE_PROMPT + "\n[검증 요청]\n" + user_text
+        preflight = inspect_request(user_text, config.SCENE_PATH_POLICY)
+        if active_tool_mode != "verify" and preflight.allowed:
+            effective_user_text = preflight.normalized_request
         spec = VerificationSpec.from_request(user_text, force=active_tool_mode == "verify")
         managed_verification = self.enable_verification and spec.enabled
         if self.enable_logging:
@@ -389,6 +403,11 @@ class Agent:
                     tool_mode=active_tool_mode,
                     verification_orchestration=managed_verification,
                     verification_spec=spec.__dict__,
+                    preflight={
+                        "allowed": preflight.allowed,
+                        "canonical_scene_path": preflight.canonical_scene_path,
+                        "issues": [issue.__dict__ for issue in preflight.issues],
+                    },
                 )
             except OSError as e:
                 self._run_log = None
@@ -402,8 +421,23 @@ class Agent:
         build_success: bool | None = None
         started = time.monotonic()
         try:
+            if active_tool_mode != "verify" and not preflight.allowed:
+                details = "; ".join(issue.message for issue in preflight.blocking_issues)
+                self._log(
+                    "preflight_failed",
+                    issues=[issue.__dict__ for issue in preflight.blocking_issues],
+                )
+                self.on_warn(f"사전 검사 실패 — Unity를 변경하지 않았습니다. {details}")
+                outcome = "preflight_failed"
+                return False
+            for issue in preflight.issues:
+                if not issue.blocking:
+                    self.on_warn(f"사전 검사: {issue.message}")
             self._suppress_text = managed_verification
-            if active_tool_mode == "verify" and managed_verification:
+            if repair_existing and managed_verification:
+                build_success = None
+                self._log("builder_skipped_for_existing_repair")
+            elif active_tool_mode == "verify" and managed_verification:
                 build_success = None
             else:
                 build_success = await self._execute_requested_work(
@@ -411,7 +445,10 @@ class Agent:
                 )
             if managed_verification:
                 success = await self._run_verification_orchestration(
-                    spec, build_success, started, allow_fix=active_tool_mode != "verify"
+                    spec,
+                    build_success,
+                    started,
+                    allow_fix=active_tool_mode != "verify",
                 )
                 outcome = "verified" if success else "failed"
             else:
@@ -542,8 +579,48 @@ class Agent:
             await self._verification_call(contract, "unity_get_state", {})
             return contract.playing
 
-        async def measure_motion(label: str, key: str, boost: bool = False) -> bool:
-            if not await confirm_play_active():
+        async def wait_for_stable_player() -> bool:
+            """Wait until spawn gravity/depenetration has settled before input."""
+            previous = None
+            for _ in range(10):
+                await self._verification_call(
+                    contract, "unity_get_gameobject", {"target": "Player"}
+                )
+                current = contract.latest_positions.get("player")
+                if (
+                    previous is not None
+                    and current is not None
+                    and abs(current[0] - previous[0]) <= 0.02
+                    and abs(current[1] - previous[1]) <= 0.02
+                ):
+                    return True
+                previous = current
+                await self._verification_call(
+                    contract, "unity_wait", {"seconds": 0.2}
+                )
+            return False
+
+        async def restart_play() -> bool:
+            """Reset runtime state so one measurement cannot contaminate the next."""
+            if contract.playing:
+                await self._verification_call(
+                    contract, "unity_play_mode", {"action": "stop"}
+                )
+                await self._verification_call(contract, "unity_wait", {"seconds": 0.5})
+            await self._verification_call(
+                contract, "unity_play_mode", {"action": "play"}
+            )
+            await self._verification_call(contract, "unity_wait", {"seconds": 0.7})
+            return await confirm_play_active() and await wait_for_stable_player()
+
+        async def measure_motion(
+            label: str, key: str, duration: float, boost: bool = False
+        ) -> bool:
+            if (
+                "movement" in contract.blocked_by
+                or (boost and "boost" in contract.blocked_by)
+                or not await restart_play()
+            ):
                 return False
             await self._verification_call(
                 contract, "unity_get_gameobject", {"target": "Player"}
@@ -554,6 +631,7 @@ class Agent:
                 )
             if not contract.begin_motion(label):
                 return False
+            contract.motion_duration[label] = duration
             await self._verification_call(contract, "unity_send_key", {
                 "key": key, "action": "press",
             })
@@ -561,7 +639,7 @@ class Agent:
                 await self._verification_call(contract, "unity_send_key", {
                     "key": "leftShift", "action": "press",
                 })
-            await self._verification_call(contract, "unity_wait", {"seconds": 0.5})
+            await self._verification_call(contract, "unity_wait", {"seconds": duration})
             if boost:
                 await self._verification_call(contract, "unity_send_key", {
                     "key": "leftShift", "action": "release",
@@ -569,7 +647,6 @@ class Agent:
             await self._verification_call(contract, "unity_send_key", {
                 "key": key, "action": "release",
             })
-            await self._verification_call(contract, "unity_wait", {"seconds": 0.5})
             await self._verification_call(
                 contract, "unity_get_gameobject", {"target": "Player"}
             )
@@ -578,10 +655,23 @@ class Agent:
                     contract, "unity_get_gameobject", {"target": "Main Camera"}
                 )
             contract.end_motion(label)
+            await self._verification_call(
+                contract, "unity_read_console", {"types": "error,exception"}
+            )
             return True
 
         try:
             await self._verification_call(contract, "unity_get_state", {})
+            # A failed builder/repair may leave Play Mode running or a virtual
+            # key held. Normalize to Edit Mode before classifying the next
+            # console read as compile evidence.
+            if contract.playing:
+                await self._verification_call(contract, "unity_get_input_state", {})
+                await self._verification_call(
+                    contract, "unity_play_mode", {"action": "stop"}
+                )
+                await self._verification_call(contract, "unity_wait", {"seconds": 0.5})
+                await self._verification_call(contract, "unity_get_state", {})
             await self._verification_call(
                 contract, "unity_read_console", {"types": "error,exception"}
             )
@@ -590,7 +680,23 @@ class Agent:
                     contract, "unity_get_gameobject", {"target": target}
                 )
 
-            if spec.require_gameplay:
+            static_failures = []
+            if not contract.state_seen or not contract.scene_clean:
+                static_failures.append("scene_not_ready")
+            if not contract.compile_checked or contract.compile_error_count:
+                static_failures.append("compile_not_ready")
+            if contract.policy_violations:
+                static_failures.append("policy_lint_failed")
+            for target, required in spec.required_components.items():
+                observed = contract.observed_components.get(target, [])
+                if any(not contract._has_component(observed, item) for item in required):
+                    static_failures.append(f"component_not_ready:{target}")
+            if static_failures:
+                for stage in ("gameplay", "movement", "jump", "boost", "camera", "screenshot"):
+                    for reason in static_failures:
+                        contract.block(stage, reason)
+
+            if spec.require_gameplay and not static_failures:
                 result = await self._verification_call(
                     contract, "unity_play_mode", {"action": "play"}
                 )
@@ -607,15 +713,39 @@ class Agent:
                         await self._verification_call(
                             contract, "unity_read_console", {"types": "log"}
                         )
+                if spec.require_idle_stability and await confirm_play_active():
+                    await wait_for_stable_player()
+                    contract.idle_before = contract.latest_positions.get("player")
+                    await self._verification_call(
+                        contract, "unity_wait", {"seconds": spec.idle_duration}
+                    )
+                    await self._verification_call(
+                        contract, "unity_get_gameobject", {"target": "Player"}
+                    )
+                    contract.idle_after = contract.latest_positions.get("player")
+                    if contract.idle_before is None or contract.idle_after is None:
+                        contract.block("movement", "stable_spawn_not_observed")
+                        contract.block("jump", "stable_spawn_not_observed")
+                        contract.block("boost", "stable_spawn_not_observed")
+                        contract.block("camera", "stable_spawn_not_observed")
+                    elif contract.idle_after[1] < contract.idle_before[1] - 2:
+                        for stage in ("movement", "jump", "boost", "camera"):
+                            contract.block(stage, "player_fell_during_spawn_check")
                 if spec.require_movement:
-                    await measure_motion("rightArrow", "rightArrow")
+                    await measure_motion("rightArrow", "rightArrow", 0.5)
                 if spec.require_bidirectional:
-                    await measure_motion("d", "d")
-                    await measure_motion("a", "a")
+                    await measure_motion("d", "d", spec.movement_duration)
+                    await measure_motion("a", "a", spec.movement_duration)
                 if spec.require_boost:
-                    await measure_motion("boost_normal", "d")
-                    await measure_motion("boost_shift", "d", boost=True)
-                if spec.require_jump and await confirm_play_active():
+                    await measure_motion("boost_normal", "d", spec.boost_duration)
+                    await measure_motion(
+                        "boost_shift", "d", spec.boost_duration, boost=True
+                    )
+                    if spec.require_left_boost:
+                        await measure_motion(
+                            "boost_left", "a", spec.boost_duration, boost=True
+                        )
+                if spec.require_jump and "jump" not in contract.blocked_by and await restart_play():
                     # Capture two post-input samples so a brief apex is not
                     # mistaken for a failed jump.
                     await self._verification_call(
@@ -624,13 +754,26 @@ class Agent:
                     await self._verification_call(contract, "unity_send_key", {
                         "key": "space", "action": "tap", "duration": 0.08,
                     })
-                    await self._verification_call(contract, "unity_wait", {"seconds": 0.5})
+                    for delay in (0.15, 0.15, 0.2, 0.5, 0.5, 0.5, 0.5):
+                        await self._verification_call(
+                            contract, "unity_wait", {"seconds": delay}
+                        )
+                        await self._verification_call(
+                            contract, "unity_get_gameobject", {"target": "Player"}
+                        )
+                        current = contract.latest_positions.get("player")
+                        if (
+                            contract.jump_before is not None
+                            and current is not None
+                            and contract.jump_peak_y is not None
+                            and contract.jump_peak_y
+                                >= contract.jump_before[1] + spec.jump_min_rise
+                            and abs(current[1] - contract.jump_before[1]) <= 0.15
+                        ):
+                            contract.jump_landed = True
+                            break
                     await self._verification_call(
-                        contract, "unity_get_gameobject", {"target": "Player"}
-                    )
-                    await self._verification_call(contract, "unity_wait", {"seconds": 0.5})
-                    await self._verification_call(
-                        contract, "unity_get_gameobject", {"target": "Player"}
+                        contract, "unity_read_console", {"types": "error,exception"}
                     )
                 if spec.require_screenshot and contract.playing:
                     stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -680,7 +823,7 @@ class Agent:
             "phase": "verify", "attempt": 1,
             "failures": failures, "evidence": contract.evidence(),
         })
-        previous_fingerprint = tuple(sorted(failures))
+        previous_failures = set(failures)
         stagnant = 0
 
         for cycle in range(1, config.FIX_MAX_CYCLES + 1):
@@ -729,6 +872,53 @@ class Agent:
                 note=fix_note, iterations=fix_iters,
             )
 
+            deterministic_repairs = apply_safe_repairs(
+                failures, config.UNITY_PROJECT_DIR
+            )
+            if deterministic_repairs:
+                refresh_result = await self.tools.call("unity_refresh_assets", {})
+                self.on_tool("unity_refresh_assets", {}, refresh_result)
+                self._log(
+                    "verification_deterministic_repairs",
+                    cycle=cycle,
+                    paths=deterministic_repairs,
+                    refresh_result=refresh_result,
+                )
+
+            # Repair is allowed to edit scene components. Enforce the save
+            # barrier ourselves so a model omission cannot leave a dirty scene
+            # or turn a correct repair into a false regression.
+            if spec.scene_path:
+                state_result = await self.tools.call("unity_get_state", {})
+                try:
+                    state, _ = json.JSONDecoder().raw_decode(state_result.lstrip())
+                    is_playing = bool(
+                        state.get("status") == "ok"
+                        and state.get("result", {}).get("isPlaying")
+                    )
+                except (TypeError, ValueError, AttributeError):
+                    is_playing = False
+                if is_playing:
+                    stop_result = await self.tools.call(
+                        "unity_play_mode", {"action": "stop"}
+                    )
+                    self.on_tool(
+                        "unity_play_mode", {"action": "stop"}, stop_result
+                    )
+                    await asyncio.sleep(0.5)
+                save_result = await self.tools.call(
+                    "unity_save_scene", {"path": spec.scene_path}
+                )
+                self.on_tool(
+                    "unity_save_scene", {"path": spec.scene_path}, save_result
+                )
+                self._log(
+                    "verification_repair_save_barrier",
+                    cycle=cycle,
+                    path=spec.scene_path,
+                    result=save_result,
+                )
+
             contract = await self._collect_verification(spec)
             failures = contract.failures()
             if self._turn_mutation_count == 0:
@@ -737,15 +927,41 @@ class Agent:
                 "phase": "reverify", "attempt": cycle + 1,
                 "failures": failures, "evidence": contract.evidence(),
             })
-            fingerprint = tuple(sorted(failures))
-            if fingerprint == previous_fingerprint:
+            current_failures = set(failures)
+            resolved = sorted(previous_failures - current_failures)
+            introduced = sorted(current_failures - previous_failures)
+            persisted = sorted(current_failures & previous_failures)
+            self._log(
+                "verification_failure_delta",
+                cycle=cycle,
+                resolved=resolved,
+                introduced=introduced,
+                persisted=persisted,
+            )
+            critical_prefixes = (
+                "asset_missing:", "compile_errors:", "runtime_errors:",
+                "wrong_active_scene:", "scene_not_saved", "component_missing:",
+                "player_did_not_", "d_did_not_", "a_did_not_",
+                "camera_did_not_", "boost_distance_", "left_boost_distance_",
+                "idle_drift_", "player_did_not_land",
+            )
+            critical_new = [
+                item for item in introduced if item.startswith(critical_prefixes)
+            ]
+            if critical_new:
+                failures.append("verification_regressed")
+                self._log(
+                    "verification_regression_stop", cycle=cycle, critical_new=critical_new
+                )
+                break
+            if not resolved and len(current_failures) >= len(previous_failures):
                 stagnant += 1
                 if config.NO_PROGRESS_LIMIT and stagnant >= config.NO_PROGRESS_LIMIT:
                     failures.append("no_verification_progress")
                     break
             else:
                 stagnant = 0
-            previous_fingerprint = fingerprint
+            previous_failures = current_failures
 
         success = not failures
         status = "verified" if success else "failed"

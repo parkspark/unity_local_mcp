@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import sys
+from pathlib import Path
 
 import ollama
 from prompt_toolkit import PromptSession
@@ -20,6 +21,7 @@ from rich.markup import escape
 
 import config
 from agent import Agent
+from bridge_install import ensure_bridge_dependencies, ensure_bridge_installed, ensure_new_input_is_enabled
 from mcp_client import UnityTools
 from project_settings import select_project
 
@@ -114,18 +116,99 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="PATH",
         help="연결할 Unity 프로젝트 루트(Assets와 ProjectSettings가 있는 폴더)",
     )
+    parser.add_argument(
+        "--prompt-file",
+        metavar="PATH",
+        help="UTF-8 프롬프트 파일 전체를 한 번 실행하고 종료",
+    )
+    parser.add_argument(
+        "--repair-existing",
+        action="store_true",
+        help="초기 builder를 건너뛰고 기존 산출물의 실패 항목만 검증·수정",
+    )
     return parser.parse_args(argv)
+
+
+def _browse_for_project() -> str | None:
+    """Open a native folder picker only when a user explicitly requests it."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        selected = filedialog.askdirectory(title="Select Unity project (Assets and ProjectSettings)")
+        root.destroy()
+        return selected or None
+    except Exception:
+        return None
+
+
+def _select_interactively(default_project: str) -> str | None:
+    """Allow normal CLI startup to choose a project instead of silently reusing one."""
+    try:
+        suggestion = select_project(None, default_project).path
+    except ValueError:
+        suggestion = default_project
+    console.print(f"Unity project (Enter = recent): [cyan]{suggestion}[/cyan]")
+    console.print("Paste a Unity project folder, or enter [cyan]b[/cyan] to browse.")
+    try:
+        answer = input("Unity project> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if answer.lower() in {"b", "browse"}:
+        answer = _browse_for_project() or ""
+        if not answer:
+            return None
+    return answer or suggestion
 
 
 async def main(args: argparse.Namespace | None = None):
     args = args or _parse_args()
+    project_arg = args.project
+    # Explicit command-line and environment configuration stay non-interactive
+    # for CI and scripts. A person launching the normal REPL gets a choice.
+    if not project_arg and not os.environ.get("UNITY_PROJECT_DIR") and sys.stdin.isatty():
+        project_arg = _select_interactively(config.UNITY_PROJECT_DIR)
+        if project_arg is None:
+            console.print("[yellow]Project selection cancelled.[/yellow]")
+            return 2
     try:
-        selection = select_project(args.project, config.UNITY_PROJECT_DIR)
+        selection = select_project(project_arg, config.UNITY_PROJECT_DIR)
     except ValueError as exc:
         console.print(f"[bold red]프로젝트 설정 오류:[/bold red] {escape(str(exc))}")
         return 2
 
     config.UNITY_PROJECT_DIR = selection.path
+    packages = ensure_bridge_dependencies(selection.path)
+    if packages.status == "packages_added":
+        console.print(f"[green]Installed Unity packages: {', '.join(packages.added)}[/green]")
+    elif packages.status not in {"already_ready"}:
+        console.print(
+            f"[bold red]Package setup failed:[/bold red] "
+            f"{escape(packages.message or '')}"
+        )
+        return 2
+    if ensure_new_input_is_enabled(selection.path):
+        console.print("[green]Enabled Unity Input System compatibility (Both).[/green]")
+
+    bridge = ensure_bridge_installed(
+        selection.path,
+        Path(config.UNITY_MCP_DIR) / "UnityBridge" / "UnityMcpBridge.cs",
+    )
+    if bridge.status == "installed":
+        console.print(f"[green]Installed Unity MCP bridge: {bridge.path}[/green]")
+        console.print(
+            "[yellow]Return to Unity and wait for compilation. "
+            "The Console must show '[McpBridge] Listening' before connecting.[/yellow]"
+        )
+    elif bridge.status in {"source_missing", "install_failed"}:
+        console.print(
+            f"[bold red]Bridge installation failed:[/bold red] "
+            f"{escape(bridge.message or '')}"
+        )
+        return 2
     console.print(f"[dim]Unity 프로젝트 ({selection.source}): {selection.path}[/dim]")
     if selection.warning:
         console.print(f"[yellow]경고: {escape(selection.warning)}[/yellow]")
@@ -156,6 +239,30 @@ async def main(args: argparse.Namespace | None = None):
             console.print(f"[dim]MCP 감사 로그: {ut.last_audit_log_path}[/dim]")
         elif ut.audit_log_error:
             console.print(f"[yellow]MCP 감사 로그를 시작하지 못했습니다: {escape(ut.audit_log_error)}[/yellow]")
+
+        if args.prompt_file:
+            try:
+                prompt = Path(args.prompt_file).read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                console.print(f"[bold red]프롬프트 파일 오류:[/bold red] {escape(str(exc))}")
+                return 2
+            if not prompt:
+                console.print("[bold red]프롬프트 파일이 비어 있습니다.[/bold red]")
+                return 2
+            success = await agent.run_turn(
+                prompt, repair_existing=bool(getattr(args, "repair_existing", False))
+            )
+            print()
+            if agent.last_run_log_paths:
+                text_path, jsonl_path = agent.last_run_log_paths
+                console.print(f"[dim]실행 로그: {text_path}[/dim]")
+                console.print(f"[dim]JSONL: {jsonl_path}[/dim]")
+            if agent.last_verification_receipt_path:
+                console.print(
+                    f"[dim]검증 영수증: {agent.last_verification_receipt_path}[/dim]"
+                )
+            return 0 if success else 1
+
         try:
             session: PromptSession | None = PromptSession()
         except Exception:

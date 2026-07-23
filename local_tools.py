@@ -47,12 +47,12 @@ SCHEMAS = [
             "description": (
                 "Wait briefly without sending a Unity command. Use this after entering play mode "
                 "so Start/Awake/runtime errors have time to occur before unity_read_console. "
-                "Allowed range is 0.5 to 10 seconds."
+                "Allowed range is 0.05 to 10 seconds."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "seconds": {"type": "number", "description": "Seconds to wait (0.5..10)."},
+                    "seconds": {"type": "number", "description": "Seconds to wait (0.05..10)."},
                 },
                 "required": ["seconds"],
             },
@@ -200,9 +200,9 @@ def wait_seconds(args: dict) -> float:
     try:
         seconds = float(args.get("seconds"))
     except (TypeError, ValueError):
-        raise ValueError("seconds must be a number between 0.5 and 10")
-    if not 0.5 <= seconds <= 10:
-        raise ValueError("seconds must be between 0.5 and 10")
+        raise ValueError("seconds must be a number between 0.05 and 10")
+    if not 0.05 <= seconds <= 10:
+        raise ValueError("seconds must be between 0.05 and 10")
     return seconds
 
 

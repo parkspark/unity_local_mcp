@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import time
 from contextlib import AsyncExitStack
 
 from mcp import ClientSession, StdioServerParameters
@@ -49,12 +50,28 @@ def _bridge_port() -> str | None:
     """
     if not config.UNITY_PROJECT_DIR:
         return None
+    session = _bridge_session()
+    if session and str(session.get("port", "")).isdigit():
+        return str(session["port"])
     path = os.path.join(config.UNITY_PROJECT_DIR, "Library", "McpBridgePort.txt")
     try:
         with open(path, encoding="utf-8") as f:
             port = f.read().strip()
         return port if port.isdigit() else None
     except OSError:
+        return None
+
+
+def _bridge_session() -> dict | None:
+    """Read the project-scoped bridge identity file when bridge v0.3+ provides it."""
+    if not config.UNITY_PROJECT_DIR:
+        return None
+    path = os.path.join(config.UNITY_PROJECT_DIR, "Library", "McpBridgeSession.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else None
+    except (OSError, json.JSONDecodeError):
         return None
 
 
@@ -114,6 +131,15 @@ _READONLY = {
     "unity_read_console", "unity_list_assets", "unity_screenshot",
 }
 
+_MUTATIONS = {
+    "unity_create_gameobject", "unity_create_gameobjects", "unity_modify_gameobject",
+    "unity_delete_gameobject", "unity_add_component", "unity_remove_component",
+    "unity_set_component_property", "unity_create_material", "unity_create_scene",
+    "unity_open_scene", "unity_save_scene", "unity_refresh_assets", "unity_write_script",
+    "unity_delete_script", "unity_install_level_loader", "unity_write_level",
+    "unity_execute_menu_item",
+}
+
 # 검증은 씬/파일을 고치지 않는다. 플레이 모드 전환과 입력/스크린샷은
 # 검증 행위이므로 허용하지만, 모든 편집·파일 쓰기 도구는 스키마에서도 숨기고
 # call() 경계에서도 다시 차단한다(누수 tool-call 우회 방지).
@@ -150,6 +176,8 @@ class UnityTools:
             except OSError as e:
                 self.audit_log_error = f"{type(e).__name__}: {e}"
         self._port = _bridge_port() or "8722"  # 서버 프로세스에 넘겨준 포트
+        session_info = _bridge_session() or {}
+        self._bridge_generation = str(session_info.get("generation", ""))
         params = _server_params()
         # 서버 stderr("Processing request..." 로그)가 채팅 화면에 섞이지 않게 파일로
         errlog = self._stack.enter_context(
@@ -165,6 +193,7 @@ class UnityTools:
         self._all_ollama_tools = [_to_ollama(t) for t in self.tools] + local_tools.SCHEMAS
         self._schemas = {t.name: t.inputSchema for t in self.tools}
         self._project_dir: str | None = config.UNITY_PROJECT_DIR or None
+        self._project_identity_verified = False
         self.last_raw_result = ""  # /last 명령용, 절단 전 원본
         self.tool_mode = "full"
         self.set_tool_mode(config.TOOL_MODE)
@@ -212,6 +241,81 @@ class UnityTools:
         await self.__aenter__()
         self.set_tool_mode(previous_mode)
         return True
+
+    def _recovery_event(self, phase: str, **payload) -> None:
+        if self._audit_log is None:
+            return
+        try:
+            self._audit_log.event("recovery_event", phase=phase, **payload)
+        except OSError as error:
+            self.audit_log_error = f"{type(error).__name__}: {error}"
+            self._audit_log.abort()
+            self._audit_log = None
+
+    def _project_identity_error(self, ping_text: str) -> str | None:
+        try:
+            result = json.loads(ping_text)["result"]
+            actual = os.path.normcase(os.path.realpath(str(result["projectPath"])))
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return "Unity bridge identity could not be read"
+        expected = os.path.normcase(os.path.realpath(config.UNITY_PROJECT_DIR))
+        if actual != expected:
+            return f"Unity bridge project mismatch: expected {expected}, got {actual}"
+        return None
+
+    async def _ensure_project_identity(self) -> str | None:
+        if self._project_identity_verified or not config.UNITY_PROJECT_DIR:
+            return None
+        ping = await self._call_once("unity_ping", {})
+        error = self._project_identity_error(ping)
+        if error is None:
+            self._project_identity_verified = True
+            return None
+        return error
+
+    async def _recover_bridge(self, reason: str) -> bool:
+        """Wait for domain reload and prove liveness even when the port is unchanged."""
+        started = time.monotonic()
+        deadline = started + config.BRIDGE_RECOVERY_TIMEOUT_SECONDS
+        attempt = 0
+        self._recovery_event("bridge_unavailable", reason=reason, port=self._port)
+        while time.monotonic() < deadline:
+            attempt += 1
+            if attempt == 1 or attempt % 5 == 0:
+                import winfocus
+                winfocus.focus_unity(config.UNITY_PROJECT_DIR)
+            port_changed = await self._reconnect_if_port_changed()
+            ping = await self._call_once("unity_ping", {})
+            error = self._project_identity_error(ping)
+            if error is None:
+                session_info = _bridge_session() or {}
+                generation = str(session_info.get("generation", ""))
+                generation_changed = bool(
+                    generation and self._bridge_generation
+                    and generation != self._bridge_generation
+                )
+                self._bridge_generation = generation or self._bridge_generation
+                self._project_identity_verified = True
+                self._recovery_event(
+                    "bridge_ready",
+                    attempt=attempt,
+                    elapsed_seconds=round(time.monotonic() - started, 3),
+                    port=self._port,
+                    port_changed=port_changed,
+                    generation_changed=generation_changed,
+                )
+                return True
+            if "mismatch" in error:
+                self._recovery_event("project_mismatch", attempt=attempt, error=error)
+                return False
+            await asyncio.sleep(config.BRIDGE_RECOVERY_POLL_SECONDS)
+        self._recovery_event(
+            "bridge_recovery_timeout",
+            attempts=attempt,
+            elapsed_seconds=round(time.monotonic() - started, 3),
+            port=self._port,
+        )
+        return False
 
     @property
     def names(self) -> list[str]:
@@ -267,19 +371,21 @@ class UnityTools:
         prev_focus = 0
         if config.FOCUS_UNITY_ON_COMPILE:
             import winfocus
-            prev_focus = winfocus.focus_unity()
+            prev_focus = winfocus.focus_unity(config.UNITY_PROJECT_DIR)
         await asyncio.sleep(1.5)  # 컴파일은 refresh 반환 직후에 시작될 수 있다
-        for _ in range(45):  # 최대 ~90초 (첫 스크립트 임포트 + 도메인 리로드는 오래 걸린다)
+        deadline = time.monotonic() + config.BRIDGE_RECOVERY_TIMEOUT_SECONDS
+        bridge_missing = False
+        while time.monotonic() < deadline:
             if self._dismiss_known_modals():
                 await asyncio.sleep(2)  # 모달 해제 후 에디터가 이어서 진행할 시간
             state = await self._call_once("unity_get_state", {})
             try:
                 r = json.loads(state)["result"]
             except (json.JSONDecodeError, KeyError, TypeError):
-                # 도메인 리로드로 브리지 다운 — 포트가 바뀌었으면 재접속 후 계속 대기
-                await self._reconnect_if_port_changed()
-                await asyncio.sleep(2)
+                bridge_missing = True
+                await self._recover_bridge("compile_domain_reload")
                 continue
+            bridge_missing = False
             if not r.get("isCompiling") and not r.get("isUpdating"):
                 # 완료했을 때만 포커스를 되돌린다 — 타임아웃 시 되돌리면 백그라운드의
                 # Unity가 리로드를 마저 끝내지 못한다
@@ -291,10 +397,11 @@ class UnityTools:
                     'unity_read_console types="error"로 컴파일 에러를 확인하세요.]'
                 )
             await asyncio.sleep(2)
-        return refresh_text + (
-            "\n[90초가 지나도 아직 컴파일 중입니다. Unity 에디터에 확인 대화상자가 떠 있지 "
-            "않은지 확인하세요. unity_get_state로 상태를 이어서 확인할 수 있습니다.]"
-        )
+        if bridge_missing:
+            detail = "브릿지 재연결 시간이 초과되었습니다"
+        else:
+            detail = "Unity 컴파일 또는 에셋 갱신 시간이 초과되었습니다"
+        return refresh_text + f"\n[{detail}. recovery_event 로그를 확인하세요.]"
 
     def _coerce_args(self, name: str, args: dict) -> dict:
         """스키마상 array/number/bool 인자가 문자열로 오면 json.loads로 보정."""
@@ -363,11 +470,17 @@ class UnityTools:
                 f"Available: {', '.join(sorted(self.names))}"
             )
         args = self._coerce_args(name, args)
+        if name in _MUTATIONS:
+            identity_error = await self._ensure_project_identity()
+            if identity_error:
+                return json.dumps(
+                    {"status": "error", "error": identity_error}, ensure_ascii=False
+                )
         # Unity가 백그라운드/최소화면 플레이어 루프가 멈춰 키 입력이 게임에 닿지 않는다.
         # 입력 시뮬레이션 전에 호스트가 결정적으로 포커스를 확보한다.
         if name == "unity_send_key" and config.FOCUS_UNITY_ON_INPUT:
             import winfocus
-            winfocus.focus_unity()
+            winfocus.focus_unity(config.UNITY_PROJECT_DIR)
         text = await self._call_once(name, args)
         # 도메인 리로드(플레이 모드 전환·스크립트 컴파일) 중엔 브리지가 몇 초 다운된다.
         # "Cannot reach"는 명령이 Unity에 도달하지 못한 경우라 재시도해도 안전 → 1회만.
@@ -379,10 +492,9 @@ class UnityTools:
             # 모달이 에디터를 막아 생긴 무응답일 수 있다 — 알려진 모달부터 처리
             dismissed = self._dismiss_known_modals()
             # 리로드로 브리지가 다른 포트로 옮겨갔을 수 있다
-            if not await self._reconnect_if_port_changed():
-                await asyncio.sleep(4)
-                await self._reconnect_if_port_changed()
-            text = await self._call_once(name, args)
+            recovered = await self._recover_bridge(f"{name}:{text[:120]}")
+            if recovered:
+                text = await self._call_once(name, args)
             if dismissed:
                 text += "\n[막고 있던 API 업데이트 동의 모달을 자동 처리했습니다]"
         if name == "unity_refresh_assets":

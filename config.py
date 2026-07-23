@@ -2,6 +2,8 @@
 
 import os
 
+from version import __version__
+
 # Ollama
 MODEL = os.environ.get("UNITY_AGENT_MODEL", "qwen3-coder:30b")
 # qwen2.5vl:32b is installed on the target workstation. Keep this overrideable
@@ -98,4 +100,29 @@ NO_PROGRESS_LIMIT = int(os.environ.get("UNITY_AGENT_NO_PROGRESS_LIMIT", "2"))
 VERIFICATION_RECEIPT_DIR = os.path.abspath(os.environ.get(
     "UNITY_AGENT_RECEIPT_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "receipts"),
+))
+
+# ---- v1.10: deterministic preflight / recovery ----
+
+VERSION = __version__
+# strict: conflicting scene paths stop before mutation.
+# acceptance: the single scene path in the acceptance section wins.
+SCENE_PATH_POLICY = os.environ.get(
+    "UNITY_AGENT_SCENE_PATH_POLICY", "strict"
+).strip().lower()
+if SCENE_PATH_POLICY not in {"strict", "acceptance"}:
+    SCENE_PATH_POLICY = "strict"
+
+# Read-only inspection of an existing project script can be enabled without
+# granting delete access. This is useful for conversational diagnose/fix tasks
+# where naming every existing script is unnecessarily repetitive.
+ALLOW_UNSCOPED_SCRIPT_READ = os.environ.get(
+    "UNITY_AGENT_ALLOW_UNSCOPED_SCRIPT_READ", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
+
+BRIDGE_RECOVERY_TIMEOUT_SECONDS = float(os.environ.get(
+    "UNITY_AGENT_BRIDGE_RECOVERY_TIMEOUT", "120"
+))
+BRIDGE_RECOVERY_POLL_SECONDS = float(os.environ.get(
+    "UNITY_AGENT_BRIDGE_RECOVERY_POLL", "1"
 ))

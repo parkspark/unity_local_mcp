@@ -1,0 +1,101 @@
+CLI의 `--project`로 지정된 격리 프로젝트에서, 새 씬 `Assets/Scenes/Platformer25D_MVP.unity`에 2.5D 플랫포머 MVP를 제작해줘.
+
+[격리 및 오염 방지 — 최우선]
+- 이 요청의 유일한 최종 씬 경로는 `Assets/Scenes/Platformer25D_MVP.unity`다. `_22`, `_23` 등 다른 씬 경로를 만들거나 사용하지 마라.
+- 작업 시작 전에 위 대상 씬이 이미 존재하는지 확인하라. 존재한다면 Unity를 변경·저장·삭제하지 말고 `isolated_target_already_exists`를 보고한 뒤 중단하라. 기존 산출물을 새 작업의 입력으로 사용하지 마라.
+- 대상이 없을 때에만 위 경로에 새 Basic Scene을 정확히 한 번 만들고, 그 씬만 열어 작업하라.
+- `Assets/Scenes`의 다른 모든 씬은 열거나 변경·저장·삭제하지 마라. 다른 프로젝트로 전환하거나, `--project`로 지정되지 않은 프로젝트의 파일을 사용하지 마라.
+- 이 실행에서 생성한 대상 씬은 검증 실패 시 재생성·초기화하지 말고 실패한 항목만 수정한 뒤 재검증하라.
+- 씬 외에는 이 요청에 명시한 `Assets/Scripts/PlayerMovement25D.cs`, `Assets/Scripts/SideScrollerCamera.cs`만 생성·수정할 수 있다. 그 밖의 기존 에셋과 스크립트는 변경하지 마라.
+
+[중요]
+이 요청은 제작, Play Mode 실측 검증, 실패 수정, 재검증까지 포함한다.
+모델의 설명만으로 완료하지 말고 모든 합격 조건을 실제 Unity 도구 결과로 확인해라.
+검증 실패 시 기존 산출물을 재생성하지 말고 실패 항목만 수정한 뒤 다시 검증해라.
+최종 완료 판정은 호스트 v1.10 검증에 맡겨라.
+
+[게임 구조]
+- 3D Rigidbody와 Collider를 사용하는 2.5D 횡스크롤 게임
+- Player의 Z 이동과 회전을 고정
+- 시작 지점, 긴 평지, 높이가 다른 플랫폼 5개 이상, 낙사 구간, 목표 지점 구성
+- 자동 검증 중 안전하게 이동·점프할 수 있도록 시작 위치 오른쪽 8유닛은 평지로 유지
+- Main Camera는 Player를 부드럽게 추종
+- 씬을 반드시 저장
+- undefined tag에 의존하지 말 것
+- Ground 판정에 CompareTag("Ground")를 사용하지 말고 Collider/Raycast 기반으로 구현
+
+[조작]
+- A: 왼쪽 이동
+- D: 오른쪽 이동
+- Space: 점프
+- 이동 방향이 존재하는 동안 Left Shift 또는 Right Shift를 누르면 그 방향으로 부스트
+- 부스트 지속시간 0.18초
+- 부스트 재사용 대기시간 0.75초
+- 부스트 속도는 일반 이동 속도의 2배
+- 부스트 중에도 Y 속도는 보존
+- 자동 검증 호환을 위해 Left/Right Arrow도 A/D와 같은 이동 입력으로 지원
+
+[입력 구현]
+- New Input System의 Keyboard.current만 사용
+- legacy UnityEngine.Input API 사용 금지
+- Rigidbody.linearVelocity 사용
+- 키보드 null 체크
+- 바닥에 있을 때만 점프
+- 공중에서 무한 점프 금지
+
+[스크립트 산출물]
+- Assets/Scripts/PlayerMovement25D.cs
+- Assets/Scripts/SideScrollerCamera.cs
+- 클래스명과 파일명을 일치시켜라
+- 기존 파일이 있다면 먼저 읽고 중복 클래스를 만들지 마라
+
+[Player 필수 구성]
+- 이름: Player
+- Rigidbody
+- Collider
+- PlayerMovement25D
+- Z 위치 고정
+- 회전 고정
+- 낙사 시 시작 위치로 복귀
+
+[카메라 필수 구성]
+- 이름: Main Camera
+- Camera
+- SideScrollerCamera
+- Player의 X/Y를 추종하되 Z는 고정
+- 플레이 시작 직후 target이 null이 아니어야 함
+
+[Play Mode 합격 조건]
+1. 컴파일 오류와 예외가 0건
+2. 씬이 Assets/Scenes/Platformer25D_MVP.unity 로 저장되고 isDirty=false
+3. Play Mode 진입 후 런타임 오류가 0건
+4. 무입력 0.5초 동안 Player X 변화가 0.05 이하
+5. D를 1초 누르면 Player X가 2 이상 증가
+6. A를 1초 누르면 Player X가 2 이상 감소
+7. Right Arrow 입력으로도 Player X가 증가
+8. Space 입력 후 Player Y가 0.5 이상 상승
+9. 점프 후 다시 바닥에 착지
+10. D만 0.5초 입력한 이동 거리와 D+LeftShift를 입력한 거리를 측정하고, 부스트 이동 거리가 일반 이동의 1.4배 이상
+11. A+LeftShift에서도 왼쪽 방향으로 같은 부스트 효과 확인
+12. Player 이동 중 Main Camera X가 같은 방향으로 이동
+13. Play 중 Game View 스크린샷 저장
+14. 모든 가상 키의 held와 pendingReleases가 비어 있음
+15. 검증 종료 후 Play Mode가 반드시 종료됨
+
+[검증 순서]
+- 씬과 컴포넌트 확인
+- 컴파일 오류 확인
+- Play Mode 진입
+- 무입력 기준 좌표 측정
+- D 이동 측정
+- A 이동 측정
+- Space 점프의 여러 시점 Y 좌표 측정
+- 일반 이동과 Shift 부스트 이동 거리를 동일한 시간으로 비교
+- 카메라 좌표 변화 측정
+- 런타임 오류 확인
+- 스크린샷 생성
+- 모든 키 해제
+- Play Mode 종료
+- 최종 상태 확인
+
+합격 조건 중 하나라도 측정되지 않았거나 실패하면 완료라고 보고하지 말고 수정 후 해당 검증을 반복해라.

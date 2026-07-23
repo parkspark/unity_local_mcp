@@ -1,6 +1,8 @@
 import json
 import unittest
+from unittest import mock
 
+import config
 from task_contract import TaskContract
 from agent import _screenshot_path
 
@@ -20,6 +22,32 @@ def player_at(x, y=1, z=0):
 
 
 class TaskContractTests(unittest.TestCase):
+    def test_script_path_before_korean_postposition_is_scoped(self):
+        contract = TaskContract.from_request(
+            "Assets/Scripts/PlayerMovement25D.cs를 읽고 점프키를 알려줘"
+        )
+        args, violation = contract.prepare_call(
+            "unity_read_script", {"path": "Assets/Scripts/PlayerMovement25D.cs"}
+        )
+        self.assertEqual(args["path"], "Assets/Scripts/PlayerMovement25D.cs")
+        self.assertIsNone(violation)
+
+    def test_scene_mutations_cannot_escape_canonical_request_path(self):
+        contract = TaskContract.from_request(
+            "Assets/Scenes/Platformer25D_MVP.unity 씬을 만들어줘"
+        )
+        _, violation = contract.prepare_call(
+            "unity_save_scene",
+            {"path": "Assets/Scenes/Platformer25D_MVP_22.unity"},
+        )
+        self.assertIn("canonical scene target", violation)
+        args, violation = contract.prepare_call(
+            "unity_save_scene",
+            {"path": "Assets/Scenes/Platformer25D_MVP.unity"},
+        )
+        self.assertIsNone(violation)
+        self.assertEqual(args["path"], "Assets/Scenes/Platformer25D_MVP.unity")
+
     def test_extracts_screenshot_path_without_guessing(self):
         self.assertEqual(
             _screenshot_path(json.dumps({"status": "ok", "result": {"path": "C:/temp/game.png"}})),
@@ -29,8 +57,27 @@ class TaskContractTests(unittest.TestCase):
 
     def test_blocks_unscoped_existing_script_reads(self):
         contract = TaskContract.from_request("새 게임을 만들어 줘")
-        _, error = contract.prepare_call("unity_read_script", {"path": "Assets/Scripts/OldSample.cs"})
+        with unittest.mock.patch.object(config, "ALLOW_UNSCOPED_SCRIPT_READ", False):
+            _, error = contract.prepare_call("unity_read_script", {"path": "Assets/Scripts/OldSample.cs"})
         self.assertIn("did not explicitly scope", error)
+
+    def test_optionally_allows_unscoped_existing_script_reads_but_not_delete(self):
+        contract = TaskContract.from_request("현재 점프 입력을 확인해줘")
+        with unittest.mock.patch.object(config, "ALLOW_UNSCOPED_SCRIPT_READ", True):
+            _, error = contract.prepare_call("unity_read_script", {"path": "Assets/Scripts/OldSample.cs"})
+        self.assertIsNone(error)
+        _, error = contract.prepare_call("unity_delete_script", {"path": "Assets/Scripts/OldSample.cs"})
+        self.assertIn("did not explicitly scope", error)
+
+    def test_pathless_save_uses_observed_active_scene_path(self):
+        contract = TaskContract.from_request("현재 씬을 수정해줘")
+        contract.observe("unity_get_state", {}, json.dumps({
+            "status": "ok",
+            "result": {"activeScene": {"path": "Assets/Scenes/Game.unity"}},
+        }))
+        args, error = contract.prepare_call("unity_save_scene", {})
+        self.assertIsNone(error)
+        self.assertEqual(args["path"], "Assets/Scenes/Game.unity")
 
     def test_allows_scripts_written_in_this_session(self):
         contract = TaskContract.from_request("새 게임을 만들어 줘")
