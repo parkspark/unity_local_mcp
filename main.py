@@ -164,6 +164,12 @@ def _select_interactively(default_project: str) -> str | None:
     return answer or suggestion
 
 
+def _startup_step(number: int, message: str, *, completed: bool = False) -> None:
+    """Keep startup progress visible while Unity compiles or reconnects."""
+    state = "green" if completed else "cyan"
+    console.print(f"[{state}][{number}/4] {message}[/{state}]")
+
+
 async def main(args: argparse.Namespace | None = None):
     args = args or _parse_args()
     project_arg = args.project
@@ -181,6 +187,8 @@ async def main(args: argparse.Namespace | None = None):
         return 2
 
     config.UNITY_PROJECT_DIR = selection.path
+    _startup_step(1, f"프로젝트 선택 완료 — {selection.path}", completed=True)
+    _startup_step(2, "브리지와 필수 패키지 준비 중")
     packages = ensure_bridge_dependencies(selection.path)
     if packages.status == "packages_added":
         console.print(f"[green]Installed Unity packages: {', '.join(packages.added)}[/green]")
@@ -209,17 +217,19 @@ async def main(args: argparse.Namespace | None = None):
             f"{escape(bridge.message or '')}"
         )
         return 2
+    _startup_step(2, "브리지와 필수 패키지 준비 완료", completed=True)
     console.print(f"[dim]Unity 프로젝트 ({selection.source}): {selection.path}[/dim]")
     if selection.warning:
         console.print(f"[yellow]경고: {escape(selection.warning)}[/yellow]")
 
     cli = Cli(args.vision)
+    _startup_step(
+        3,
+        "Unity 브리지 연결 확인 중… 컴파일 또는 도메인 리로드 중이면 최대 120초 대기",
+    )
 
     async with UnityTools() as ut:
         agent = Agent(ut, cli.on_text, cli.on_tool, cli.on_warn, on_milestone=cli.on_milestone)
-        console.print(
-            f"[bold]연결됨:[/bold] {len(ut.ollama_tools)} tools · {agent.model} · ctx {config.NUM_CTX}"
-        )
 
         ping = await ut.call("unity_ping", {})
         try:
@@ -227,12 +237,15 @@ async def main(args: argparse.Namespace | None = None):
             if info.get("status") == "ok":
                 r = info["result"]
                 console.print(
-                    f"[green]Unity {r.get('unityVersion')} · {r.get('productName')}[/green]"
+                    f"[green][4/4] 연결 완료 — Unity {r.get('unityVersion')} · "
+                    f"{r.get('productName')} · {len(ut.ollama_tools)} tools[/green]"
                 )
             else:
-                console.print(f"[yellow]{escape(str(info.get('error')))}[/yellow]")
+                console.print(f"[yellow][3/4] Unity 브리지 연결 실패: {escape(str(info.get('error')))}[/yellow]")
         except (json.JSONDecodeError, KeyError):
-            console.print(f"[yellow]{escape(ping)}[/yellow]")
+            console.print(f"[yellow][3/4] Unity 브리지 연결 실패: {escape(ping)}[/yellow]")
+
+        console.print(f"[dim]모델: {agent.model} · context: {config.NUM_CTX}[/dim]")
 
         console.print(HELP)
         if ut.last_audit_log_path:
