@@ -24,14 +24,36 @@ from version import __version__
 VERSION = __version__
 _BUILD_WORDS = (
     "만들", "제작", "구현", "생성", "수정", "개선", "업데이트", "추가", "삭제",
+    # Common Korean repair verbs. Without these a behaviour bug report like
+    # "부스트가 동작하지 않는다. 고쳐줘" skipped host verification entirely and
+    # left the model free to declare success on its own.
+    "고치", "고쳐", "해결",
     "build", "create", "make", "implement", "update", "fix", "add", "remove",
+    "repair",
 )
 _GAME_WORDS = ("게임", "플랫포머", "횡스크롤", "platformer", "side-scroller", "game")
-_MOVEMENT_WORDS = ("플랫포머", "횡스크롤", "플레이어", "player", "이동", "movement")
-_JUMP_WORDS = ("플랫포머", "점프", "jump", "platformer")
-_CAMERA_WORDS = ("카메라", "camera", "따라", "추종", "follow")
+# Behaviour verbs are strong signals on their own. "Space 점프가 동작하지 않는다.
+# 수정하고 검증한다" must enable jump measurement even though it never says 게임 —
+# gating these on a game keyword is what allowed an empty spec to report success.
+_MOVEMENT_WORDS = ("이동", "움직", "걷", "달리", "movement", "walking", "running")
+_MOVEMENT_CONTEXT_WORDS = ("플랫포머", "횡스크롤", "플레이어", "player")
+_JUMP_WORDS = ("점프", "jump", "jumping", "착지", "landing")
+_JUMP_CONTEXT_WORDS = ("플랫포머", "platformer")
+_CAMERA_WORDS = ("카메라", "camera")
+_CAMERA_FOLLOW_WORDS = ("추종", "따라", "follow", "following")
 _LEVEL_WORDS = ("levelloader", "level json", "레벨 json", "데이터 주도", "data-driven")
-_BOOST_WORDS = ("부스트", "boost", "dash", "대시", "shift")
+_BOOST_WORDS = ("부스트", "boost", "dash", "대시")
+_BOOST_CONTEXT_WORDS = ("shift",)
+_LANDING_WORDS = ("착지", "land", "landing")
+# Runtime-behaviour language that demands Play Mode proof. If a request uses any
+# of these but no concrete check could be derived, the host refuses to report
+# success instead of silently verifying nothing (verification_spec_empty).
+_BEHAVIOUR_HINT_WORDS = (
+    "점프", "jump", "이동", "움직", "걷", "달리", "착지", "land", "landing",
+    "부스트", "boost", "대시", "dash", "추종", "follow", "조작", "입력",
+    "플레이", "play", "동작", "작동", "실행", "물리", "충돌", "collision",
+    "gameplay", "runtime",
+)
 
 MUTATION_TOOLS = {
     "unity_create_gameobject", "unity_create_gameobjects", "unity_modify_gameobject",
@@ -41,6 +63,24 @@ MUTATION_TOOLS = {
     "unity_delete_script", "unity_install_level_loader", "unity_write_level",
     "unity_execute_menu_item",
 }
+
+
+def _has_word(lower: str, words: Iterable[str]) -> bool:
+    """Match Korean by substring and Latin on latin-letter boundaries.
+
+    Korean has no word delimiters, so substring matching is correct there.
+    Latin needs a boundary or "remove" would match "move" and every deletion
+    request would demand a movement measurement. `\\b` is wrong here because
+    Hangul counts as a word character, so "Main Camera는" would not match
+    "camera" — the boundary must be defined against latin characters only.
+    """
+    for word in words:
+        if word.isascii():
+            if re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", lower):
+                return True
+        elif word in lower:
+            return True
+    return False
 
 
 def _decode(result: str) -> dict | None:
@@ -93,6 +133,9 @@ class VerificationSpec:
     enabled: bool
     asset_paths: list[str] = field(default_factory=list)
     scene_path: str | None = None
+    # The request used runtime-behaviour language, whether or not a concrete
+    # check could be derived from it.
+    behaviour_requested: bool = False
     require_gameplay: bool = False
     require_movement: bool = False
     require_jump: bool = False
@@ -121,17 +164,30 @@ class VerificationSpec:
         lower = request.lower()
         preflight = inspect_request(request, config.SCENE_PATH_POLICY)
         assets = preflight.asset_paths
-        game = any(word in lower for word in _GAME_WORDS)
-        movement = game and any(word in lower for word in _MOVEMENT_WORDS)
-        jump = game and any(word in lower for word in _JUMP_WORDS)
+        game = _has_word(lower, _GAME_WORDS)
+        # Behaviour words stand alone; entity words ("플레이어") still need game
+        # context so that "Player 이름을 바꿔줘" does not demand a Play Mode run.
+        movement = _has_word(lower, _MOVEMENT_WORDS) or (
+            game and _has_word(lower, _MOVEMENT_CONTEXT_WORDS)
+        )
+        jump = _has_word(lower, _JUMP_WORDS) or (
+            game and _has_word(lower, _JUMP_CONTEXT_WORDS)
+        )
         # A camera merely mentioned in a non-game request should not trigger an
-        # input measurement. Games requesting follow/tracking do.
-        camera = game and any(word in lower for word in _CAMERA_WORDS)
-        level = any(word in lower for word in _LEVEL_WORDS)
+        # input measurement. Games, or explicit follow/tracking wording, do.
+        camera = _has_word(lower, _CAMERA_WORDS) and (
+            game or _has_word(lower, _CAMERA_FOLLOW_WORDS)
+        )
+        boost = _has_word(lower, _BOOST_WORDS) or (
+            movement and _has_word(lower, _BOOST_CONTEXT_WORDS)
+        )
+        # Boost is measured as a ratio against normal movement, so it implies it.
+        movement = movement or boost
+        level = _has_word(lower, _LEVEL_WORDS)
         script_classes = [os.path.splitext(os.path.basename(path))[0] for path in assets
                           if path.lower().endswith(".cs")]
         components: dict[str, list[str]] = {}
-        if movement:
+        if movement or jump:
             components["Player"] = ["Rigidbody", "Collider"]
             player_class = next((name for name in script_classes
                                  if "player" in name.lower() and "movement" in name.lower()), None)
@@ -148,12 +204,16 @@ class VerificationSpec:
                 components["Main Camera"].append(camera_class)
             elif "sidescrollercamera" in lower:
                 components["Main Camera"].append("SideScrollerCamera")
+        # Any extracted behaviour condition implies Play Mode: a check that is
+        # never run must never count as passed.
+        behaviour = movement or jump or camera or boost
         return cls(
             request=preflight.normalized_request,
-            enabled=force or any(word in lower for word in _BUILD_WORDS),
+            enabled=force or _has_word(lower, _BUILD_WORDS),
             asset_paths=assets,
             scene_path=preflight.canonical_scene_path,
-            require_gameplay=game or level,
+            behaviour_requested=_has_word(lower, _BEHAVIOUR_HINT_WORDS),
+            require_gameplay=game or level or behaviour,
             require_movement=movement,
             require_jump=jump,
             require_camera_follow=camera,
@@ -167,17 +227,50 @@ class VerificationSpec:
                 "z 이동과 회전을 고정" in lower
                 or "z position and rotation" in lower
             ),
-            require_boost=movement and any(word in lower for word in _BOOST_WORDS),
+            require_boost=boost,
             require_bidirectional=movement and bool(
                 re.search(r"\ba\b", lower) and re.search(r"\bd\b", lower)
             ),
             require_level_marker=level,
             require_screenshot=game,
             require_idle_stability="무입력 0.5초" in lower or "idle 0.5" in lower,
-            require_jump_landing="다시 바닥에 착지" in lower or "land" in lower,
+            # Landing is measured as part of the jump arc, so it must not be
+            # requested without a jump measurement to attach it to.
+            require_jump_landing=jump and _has_word(lower, _LANDING_WORDS),
             require_left_boost="a+leftshift" in lower.replace(" ", ""),
             required_components=components,
         )
+
+    # Canonical check names shared by the receipt and the empty-spec guard.
+    # (name, is-requested) — evaluated in a fixed order so receipts diff cleanly.
+    def requested_checks(self) -> list[str]:
+        flags = [
+            ("gameplay", self.require_gameplay),
+            ("movement", self.require_movement),
+            ("bidirectional", self.require_bidirectional),
+            ("idle_stability", self.require_idle_stability),
+            ("jump", self.require_jump),
+            ("jump_landing", self.require_jump_landing),
+            ("camera_follow", self.require_camera_follow),
+            ("camera_fixed_z", self.require_camera_fixed_z),
+            ("camera_target", self.require_camera_target),
+            ("player_constraints", self.require_player_constraints),
+            ("boost", self.require_boost),
+            ("left_boost", self.require_left_boost),
+            ("level_marker", self.require_level_marker),
+            ("screenshot", self.require_screenshot),
+        ]
+        names = [name for name, enabled in flags if enabled]
+        names.extend(f"components:{target}" for target in sorted(self.required_components))
+        return names
+
+    def behaviour_checks(self) -> list[str]:
+        """Requested checks that need an actual Play Mode measurement."""
+        static = {"components", "level_marker", "screenshot"}
+        return [
+            name for name in self.requested_checks()
+            if name.split(":")[0] not in static
+        ]
 
     def checklist(self) -> list[str]:
         checks = [
@@ -414,6 +507,15 @@ class VerificationContract:
 
     def failures(self) -> list[str]:
         failed: list[str] = [f"tool_error:{item}" for item in self.tool_errors]
+        # A request that talks about runtime behaviour but yields no measurable
+        # condition must never be reported as verified. Previously the empty
+        # failure list read as success without Play Mode ever running.
+        if (
+            self.spec.enabled
+            and self.spec.behaviour_requested
+            and not self.spec.behaviour_checks()
+        ):
+            failed.append("verification_spec_empty")
         failed.extend(f"policy_lint:{item}" for item in self.policy_violations)
         failed.extend(
             f"blocked:{stage}:{reason}"
@@ -597,6 +699,62 @@ class VerificationContract:
     def missing_verification(self) -> list[str]:
         return self.failures()
 
+    def measured_checks(self) -> list[str]:
+        """Checks for which a real measurement exists, regardless of pass/fail."""
+        def pair(before: dict, after: dict, *labels: str) -> bool:
+            return any(
+                before.get(label) is not None and after.get(label) is not None
+                for label in labels
+            )
+
+        measured = {
+            "gameplay": self.played and self.waited and self.runtime_checked,
+            "movement": pair(self.motion_before, self.motion_after, "rightArrow")
+                        or (self.movement_before is not None
+                            and self.movement_after is not None),
+            "bidirectional": pair(self.motion_before, self.motion_after, "d")
+                             and pair(self.motion_before, self.motion_after, "a"),
+            "idle_stability": self.idle_before is not None and self.idle_after is not None,
+            "jump": self.jump_before is not None and self.jump_peak_y is not None,
+            "camera_follow": pair(self.camera_motion_before, self.camera_motion_after,
+                                  "d", "rightArrow")
+                             or (self.camera_before is not None
+                                 and self.camera_after is not None),
+            "camera_fixed_z": any(
+                self.camera_motion_after.get(label) is not None
+                for label in self.camera_motion_before
+            ),
+            "camera_target": bool(self.observed_component_data.get("Main Camera")),
+            "player_constraints": bool(self.observed_component_data.get("Player")),
+            "boost": pair(self.motion_before, self.motion_after,
+                          "boost_normal") and pair(self.motion_before,
+                                                   self.motion_after, "boost_shift"),
+            "left_boost": pair(self.motion_before, self.motion_after, "boost_left"),
+            "level_marker": self.level_marker_seen,
+            "screenshot": bool(self.screenshot_path) and self.screenshot_in_play,
+        }
+        # jump_landing rides along with the jump arc measurement.
+        measured["jump_landing"] = measured["jump"]
+        names = []
+        for name in self.spec.requested_checks():
+            if name.startswith("components:"):
+                if self.observed_components.get(name.split(":", 1)[1]):
+                    names.append(name)
+            elif measured.get(name):
+                names.append(name)
+        return names
+
+    def check_report(self) -> dict:
+        """Requested vs actually measured checks, for the verification receipt."""
+        requested = self.spec.requested_checks()
+        measured = self.measured_checks()
+        measured_set = set(measured)
+        return {
+            "requested_checks": requested,
+            "measured_checks": measured,
+            "skipped_checks": [name for name in requested if name not in measured_set],
+        }
+
     def evidence(self) -> dict:
         def delta(before, after):
             return None if before is None or after is None else [
@@ -735,7 +893,8 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
 
 def write_receipt(root_dir: str, spec: VerificationSpec, status: str, evidence: dict,
                   failures: list[str], attempts: list[dict], elapsed_seconds: float,
-                  build_success: bool | None = None) -> str:
+                  build_success: bool | None = None,
+                  check_report: dict | None = None) -> str:
     now = datetime.now().astimezone()
     day = os.path.join(os.path.abspath(root_dir), now.strftime("%Y"), now.strftime("%m"),
                        now.strftime("%d"))
@@ -749,6 +908,13 @@ def write_receipt(root_dir: str, spec: VerificationSpec, status: str, evidence: 
         "status": status,
         "request": spec.request,
         "build_stage_success": build_success,
+        # Requested vs measured makes an empty verification visible at a glance
+        # instead of hiding behind an empty failure list.
+        **(check_report or {
+            "requested_checks": spec.requested_checks(),
+            "measured_checks": [],
+            "skipped_checks": spec.requested_checks(),
+        }),
         "spec": asdict(spec),
         "evidence": evidence,
         "failures": failures,

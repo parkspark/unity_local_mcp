@@ -95,6 +95,121 @@ class VerificationSpecTests(unittest.TestCase):
         self.assertIn("Platformer25D_MVP.unity", result.normalized_request)
 
 
+class BehaviourSpecExtractionTests(unittest.TestCase):
+    """P0 회귀: 짧은 한국어 수정 요청이 검증 조건을 잃지 않아야 한다.
+
+    실제 영수증 20260723_152344에서 이 요청이 require_jump=False,
+    played=False인데도 status=verified로 기록됐다.
+    """
+
+    JUMP_FIX_REQUEST = (
+        "문제: Player가 시작 후 착지한 뒤 Space 점프가 동작하지 않는다.\n"
+        "새 요소는 생성하지말고, 점프가 잘 작동하도록 수정하고 검증한다."
+    )
+
+    def test_jump_fix_request_requires_jump_measurement(self):
+        spec = VerificationSpec.from_request(self.JUMP_FIX_REQUEST)
+        self.assertTrue(spec.enabled)
+        self.assertTrue(spec.require_jump, "게임 키워드 없이도 점프를 측정해야 한다")
+        self.assertTrue(spec.require_jump_landing, "착지 조건도 함께 추출돼야 한다")
+        self.assertTrue(spec.require_gameplay, "행동 조건이 있으면 Play Mode가 필수")
+        self.assertIn("jump", spec.behaviour_checks())
+
+    def test_jump_fix_request_cannot_pass_without_play_mode(self):
+        """영수증의 실제 실패 조건 재현: Play Mode 없이 verified가 되면 안 된다."""
+        spec = VerificationSpec.from_request(self.JUMP_FIX_REQUEST)
+        with tempfile.TemporaryDirectory() as project:
+            contract = VerificationContract(spec=spec, project_dir=project)
+            # 컴파일/씬 상태는 깨끗하지만 Play Mode는 돌지 않은 상태
+            contract.state_seen = True
+            contract.scene_clean = True
+            contract.compile_checked = True
+            failures = contract.failures()
+        self.assertIn("play_mode_not_tested", failures)
+        self.assertNotEqual(failures, [])
+
+    def test_short_korean_movement_fix_requires_movement(self):
+        spec = VerificationSpec.from_request("좌우 이동이 안 먹는다. 수정해줘")
+        self.assertTrue(spec.require_movement)
+        self.assertTrue(spec.require_gameplay)
+
+    def test_boost_request_implies_movement_baseline(self):
+        spec = VerificationSpec.from_request("부스트가 동작하지 않는다. 고쳐줘")
+        self.assertTrue(spec.enabled, "'고쳐줘'도 수리 요청이므로 검증이 켜져야 한다")
+        self.assertTrue(spec.require_boost)
+        self.assertTrue(spec.require_movement, "부스트는 일반 이동 대비 비율로 측정한다")
+
+    def test_repair_verbs_enable_managed_verification(self):
+        for request in ("점프를 고쳐줘", "이동 버그를 해결해줘", "repair the jump logic"):
+            with self.subTest(request=request):
+                self.assertTrue(VerificationSpec.from_request(request).enabled)
+
+    def test_camera_follow_without_game_word(self):
+        spec = VerificationSpec.from_request("카메라가 Player를 따라가지 않는다. 수정해줘")
+        self.assertTrue(spec.require_camera_follow)
+        self.assertTrue(spec.require_gameplay)
+
+    def test_remove_does_not_match_move(self):
+        """영어 단어 경계: 'remove'가 이동 검증을 켜면 안 된다."""
+        spec = VerificationSpec.from_request("remove the unused cube from the scene")
+        self.assertFalse(spec.require_movement)
+        self.assertFalse(spec.require_gameplay)
+
+    def test_renaming_player_does_not_demand_play_mode(self):
+        spec = VerificationSpec.from_request("Player 오브젝트 이름을 Hero로 수정해줘")
+        self.assertFalse(spec.require_movement)
+        self.assertFalse(spec.require_jump)
+        self.assertFalse(spec.require_gameplay)
+
+    def test_non_behavioural_edit_is_not_spec_empty(self):
+        """동작과 무관한 수정 요청까지 verification_spec_empty로 막으면 안 된다."""
+        spec = VerificationSpec.from_request("Assets/Scripts/Foo.cs의 오타를 수정해줘")
+        self.assertFalse(spec.behaviour_requested)
+        with tempfile.TemporaryDirectory() as project:
+            os.makedirs(os.path.join(project, "Assets", "Scripts"))
+            with open(os.path.join(project, "Assets", "Scripts", "Foo.cs"), "w") as handle:
+                handle.write("using UnityEngine; public class Foo : MonoBehaviour {}")
+            contract = VerificationContract(spec=spec, project_dir=project)
+            contract.state_seen = True
+            contract.scene_clean = True
+            contract.compile_checked = True
+            self.assertEqual(contract.failures(), [])
+
+    def test_unmappable_behaviour_request_is_refused(self):
+        """측정 조건을 못 뽑는 동작 요청은 성공 대신 spec_empty로 종료한다."""
+        spec = VerificationSpec.from_request("적 AI 충돌 판정이 동작하지 않는다. 수정하고 검증해줘")
+        self.assertTrue(spec.behaviour_requested)
+        self.assertEqual(spec.behaviour_checks(), [])
+        with tempfile.TemporaryDirectory() as project:
+            contract = VerificationContract(spec=spec, project_dir=project)
+            contract.state_seen = True
+            contract.scene_clean = True
+            contract.compile_checked = True
+            failures = contract.failures()
+        self.assertIn("verification_spec_empty", failures)
+
+    def test_check_report_separates_measured_from_skipped(self):
+        spec = VerificationSpec.from_request(self.JUMP_FIX_REQUEST)
+        with tempfile.TemporaryDirectory() as project:
+            contract = VerificationContract(spec=spec, project_dir=project)
+            report = contract.check_report()
+        self.assertIn("jump", report["requested_checks"])
+        self.assertIn("jump", report["skipped_checks"])
+        self.assertEqual(report["measured_checks"], [])
+
+        with tempfile.TemporaryDirectory() as project:
+            measured = VerificationContract(spec=spec, project_dir=project)
+            measured.played = True
+            measured.waited = True
+            measured.runtime_checked = True
+            measured.jump_before = (0.0, 1.0, 0.0)
+            measured.jump_peak_y = 2.0
+            report = measured.check_report()
+        self.assertIn("jump", report["measured_checks"])
+        self.assertIn("gameplay", report["measured_checks"])
+        self.assertNotIn("jump", report["skipped_checks"])
+
+
 class PolicyLintTests(unittest.TestCase):
     def test_platformer_policy_violations_are_found_before_play(self):
         with tempfile.TemporaryDirectory() as project:

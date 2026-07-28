@@ -4,7 +4,7 @@
 ![alt text](data/0703_unity_mcp1.gif)
 
 
-로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.1**이다.
+로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.2**이다.
 기존 [unity_mcp](../unity_mcp) MCP 서버와 Unity 브리지를 재사용하고
 (v1.7부터 send_key 등 일부 확장), Claude Code의 자리를 로컬 모델이 대신한다.
 
@@ -339,3 +339,14 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
 - ver 1.11.1 - 시작 과정을 4단계 상태 표시로 개선했습니다. 실제 `unity_ping`이 성공한
           뒤에만 연결 완료를 출력하므로, Unity 컴파일·도메인 리로드 대기와 연결 실패를
           즉시 구분할 수 있습니다.
+
+- ver 1.11.2 - **검증 공집합 성공 결함(P0) 수정.** "Space 점프가 동작하지 않는다.
+          수정하고 검증한다" 같은 요청이 `게임` 키워드가 없다는 이유로 행동 검증을
+          전부 끄고, Play Mode를 한 번도 돌리지 않은 채 `verified`로 기록되던 문제를
+          고쳤습니다. 점프·이동·착지·부스트·카메라를 게임 키워드와 독립적으로 감지하고,
+          행동 조건이 하나라도 잡히면 Play Mode를 강제합니다. 측정 가능한 조건을
+          못 뽑은 동작 요청은 성공 대신 `verification_spec_empty`로 종료하며,
+          영수증에 `requested_checks`/`measured_checks`/`skipped_checks`를 명시합니다.
+          영수증 전수 조사 결과 기존 `verified` 3건이 전부 Play Mode 미실행 상태였습니다.
+          상세: [변경 내용](docs/v1.11.2_verification_spec_reliability.md) ·
+          [진행 현황 보고서](docs/v1.11.2_status_and_improvement_report.md)

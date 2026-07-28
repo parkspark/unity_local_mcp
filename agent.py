@@ -829,6 +829,11 @@ class Agent:
         for cycle in range(1, config.FIX_MAX_CYCLES + 1):
             if not failures or not allow_fix:
                 break
+            # The model cannot repair a host-side spec extraction gap; retrying
+            # would only burn the budget and could mutate a working project.
+            if "verification_spec_empty" in failures:
+                self._log("verification_spec_empty_stop", cycle=cycle)
+                break
             if time.monotonic() - started >= config.TASK_TIMEOUT_SECONDS:
                 failures.append("task_time_budget_exhausted")
                 break
@@ -965,10 +970,12 @@ class Agent:
 
         success = not failures
         status = "verified" if success else "failed"
+        check_report = contract.check_report()
         try:
             receipt = write_receipt(
                 config.VERIFICATION_RECEIPT_DIR, spec, status, contract.evidence(),
                 failures, attempts, time.monotonic() - started, build_success,
+                check_report,
             )
             self.last_verification_receipt_path = receipt
             self._log("verification_receipt", path=receipt, status=status)
@@ -976,13 +983,25 @@ class Agent:
             receipt = None
             self.on_warn(f"검증 영수증 저장 실패: {type(error).__name__}: {error}")
 
+        measured = check_report["measured_checks"]
+        skipped = check_report["skipped_checks"]
         if success:
             report = "\n✅ 호스트 독립 검증 통과 — 실제 Unity 증거로 완료를 판정했습니다."
+            report += f"\n측정한 검증 항목: {', '.join(measured) or '(없음)'}"
+        elif "verification_spec_empty" in failures:
+            report = (
+                "\n❌ 완료로 판정하지 않았습니다 — 요청은 런타임 동작을 다루는데 "
+                "측정 가능한 검증 조건을 추출하지 못했습니다(verification_spec_empty).\n"
+                "검증 대상을 구체적으로 지정해 다시 요청하세요. "
+                "예: '점프', '좌우 이동', '착지', '카메라 추종', '부스트'."
+            )
         else:
             report = (
                 "\n❌ 완료로 판정하지 않았습니다. 미통과: "
                 + ", ".join(failures)
             )
+            if skipped:
+                report += f"\n측정하지 못한 검증 항목: {', '.join(skipped)}"
         if receipt:
             report += f"\n검증 영수증: {receipt}"
         report += "\n"
