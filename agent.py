@@ -770,7 +770,7 @@ class Agent:
                         contract, "unity_get_gameobject", {"target": "Player"}
                     )
                     await self._verification_call(contract, "unity_send_key", {
-                        "key": "space", "action": "tap", "duration": 0.08,
+                        "key": spec.jump_key, "action": "tap", "duration": 0.08,
                     })
                     for delay in (0.15, 0.15, 0.2, 0.5, 0.5, 0.5, 0.5):
                         await self._verification_call(

@@ -4,7 +4,7 @@
 ![alt text](data/0703_unity_mcp1.gif)
 
 
-로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.5**이다.
+로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.6**이다.
 기존 [unity_mcp](../unity_mcp) MCP 서버와 Unity 브리지를 재사용하고
 (v1.7부터 send_key 등 일부 확장), Claude Code의 자리를 로컬 모델이 대신한다.
 
@@ -380,3 +380,10 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           같은 루프 마커를 결함으로 세어 모델의 올바른 수정을 되돌리는 거짓 롤백을
           발견해 함께 고쳤습니다. `UNITY_AGENT_REPAIR_ROLLBACK=0`으로 끌 수 있습니다.
           상세: [docs/v1.11.5_repair_rollback.md](docs/v1.11.5_repair_rollback.md)
+
+- ver 1.11.6 - **점프 키 명세 + 개발 의존성 정리.** v1.11.4가 이동 키에 대해 고친 것과
+          같은 종류의 거짓 실패가 점프에도 있었습니다 — 요청이 "W키로 점프"여도 검증은
+          `space`를 하드코딩해 정상 게임을 실패시켰습니다. 요청에서 점프 키를 추출해
+          해당 키로 검증합니다. 또한 `pytest`/`pytest-cov`를 dev 의존성 그룹으로 선언해
+          `uv run python -m pytest tests/`가 별도 `--with` 없이 동작합니다.
+          상세: [docs/v1.11.6_jump_key_and_dev_deps.md](docs/v1.11.6_jump_key_and_dev_deps.md)

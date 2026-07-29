@@ -49,6 +49,12 @@ _LANDING_WORDS = ("착지", "land", "landing")
 # not with the harness's default arrow keys.
 _AD_SCHEME = re.compile(r"\ba\s*[/,·+]\s*d\b|\bd\s*[/,·+]\s*a\b|\bwasd\b", re.I)
 _ARROW_SCHEME = re.compile(r"방향키|화살표|arrow\s*keys?", re.I)
+# Jump key named in the request. Same class of bug as the movement scheme:
+# testing space against a game bound to W fails it for the harness's assumption.
+_JUMP_KEY_SCHEMES = (
+    (re.compile(r"\bw\s*(?:키|key)?\s*(?:로|으로)?\s*(?:점프|jump)", re.I), "w"),
+    (re.compile(r"(?:위쪽\s*방향키|up\s*arrow|uparrow)\s*(?:키|key)?\s*(?:로|으로)?\s*(?:점프|jump)", re.I), "upArrow"),
+)
 # Runtime-behaviour language that demands Play Mode proof. If a request uses any
 # of these but no concrete check could be derived, the host refuses to report
 # success instead of silently verifying nothing (verification_spec_empty).
@@ -167,6 +173,7 @@ class VerificationSpec:
     move_right_key: str = "rightArrow"
     move_left_key: str = "leftArrow"
     movement_keys_explicit: bool = False
+    jump_key: str = "space"
     boost_duration: float = 0.5
     boost_min_ratio: float = 1.4
     jump_min_rise: float = 0.5
@@ -231,6 +238,10 @@ class VerificationSpec:
             right_key, left_key, keys_explicit = "rightArrow", "leftArrow", True
         else:
             right_key, left_key, keys_explicit = "rightArrow", "leftArrow", False
+        jump_key = next(
+            (key for pattern, key in _JUMP_KEY_SCHEMES if pattern.search(request)),
+            "space",
+        )
         return cls(
             request=preflight.normalized_request,
             enabled=force or _has_word(lower, _BUILD_WORDS),
@@ -264,6 +275,7 @@ class VerificationSpec:
             move_right_key=right_key,
             move_left_key=left_key,
             movement_keys_explicit=keys_explicit,
+            jump_key=jump_key,
             require_left_boost="a+leftshift" in lower.replace(" ", ""),
             required_components=components,
         )
@@ -322,7 +334,7 @@ class VerificationSpec:
                 f"{self.idle_max_delta_x} 이하"
             )
         if self.require_jump:
-            checks.append("space 입력 전후 Player Y가 실제로 증가")
+            checks.append(f"{self.jump_key} 입력 전후 Player Y가 실제로 증가")
         if self.require_camera_follow:
             checks.append("Player 이동과 같은 구간에 Main Camera X가 실제로 증가")
         if self.require_camera_fixed_z:

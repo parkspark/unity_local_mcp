@@ -485,6 +485,26 @@ class MovementSpecTests(unittest.TestCase):
             self.assertIn("d_moved_too_far", failures)
             self.assertIn("a_moved_too_far", failures)
 
+    def test_jump_key_is_extracted_from_request(self):
+        self.assertEqual(
+            VerificationSpec.from_request("W키로 점프하게 만들어줘").jump_key, "w"
+        )
+        self.assertEqual(
+            VerificationSpec.from_request("위쪽 방향키로 점프하게 만들어줘").jump_key,
+            "upArrow",
+        )
+        # 기본값과 명시적 space 요청 모두 space
+        self.assertEqual(
+            VerificationSpec.from_request("플랫포머 게임 만들어줘").jump_key, "space"
+        )
+        self.assertEqual(
+            VerificationSpec.from_request("Space 점프를 고쳐줘").jump_key, "space"
+        )
+
+    def test_jump_checklist_uses_the_requested_key(self):
+        spec = VerificationSpec.from_request("W키로 점프하게 만들어줘")
+        self.assertTrue(any("w 입력 전후" in c for c in spec.checklist()))
+
     def test_moved_too_far_maps_to_its_check(self):
         self.assertEqual(failure_check_name("player_moved_too_far"), "movement")
         self.assertEqual(failure_check_name("d_moved_too_far"), "bidirectional")
