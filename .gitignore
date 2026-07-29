@@ -1,9 +1,23 @@
+# 파이썬 / 가상환경
 .venv/
 __pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 실행 산출물 — 요청 원문과 생성 코드가 포함될 수 있어 추적하지 않는다
 *.log
 logs/
+
+# 인계 문서 — 시점 스냅샷이라 저장소에 남기지 않는다 (AGENTS.md는 추적한다)
+docs/HANDOFF_*.md
+
+# 로컬 설정 / 백업
+.unity-local-agent.json
+*.bak
+
+# 에디터 / 도구
 .claude/
 .gemini/
 .idea/
 .vscode/
-.unity-local-agent.json
