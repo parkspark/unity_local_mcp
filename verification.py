@@ -1024,10 +1024,11 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
             lint_guidance.append(
                 "- 점프 실패: CheckGrounded Raycast가 안정 착지 위치에서 확실히 "
                 "Collider를 맞히도록 거리/시작점을 Collider.bounds 기반으로 고친다. "
-                "Keyboard.current.spaceKey.wasPressedThisFrame은 Update에서 읽어 "
+                "Keyboard.current.spaceKey.isPressed는 Update에서 읽어 "
                 "jumpRequested=true로 저장하고, FixedUpdate에서 isGrounded일 때 "
-                "점프를 적용한 뒤 false로 소비한다. wasPressedThisFrame을 "
-                "FixedUpdate에서만 읽으면 짧은 입력을 놓칠 수 있다."
+                "점프를 적용한 뒤 false로 소비한다. 브리지가 큐잉한 짧은 입력은 "
+                "wasPressedThisFrame 전환이 gameplay Update 전에 사라질 수 있으므로 "
+                "그 엣지에만 의존하지 않는다."
             )
     lint_section = "\n".join(dict.fromkeys(lint_guidance)) or "- 해당 없음"
     return f"""[독립 검증 실패 자동 수정 단계]

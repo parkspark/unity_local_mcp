@@ -638,6 +638,61 @@ def _run_orchestration(
     return success, receipt, agent, final_script
 
 
+class BuilderStageCompletionTests(unittest.TestCase):
+    def _run_builder_audit(self, contracts, model_loop_completed=True):
+        spec = VerificationSpec.from_request(
+            "Assets/Scenes/Test.unity에서 A/D 이동과 Space 점프를 구현해줘"
+        )
+        agent = ScriptedVerificationAgent(contracts)
+        with tempfile.TemporaryDirectory() as project, \
+             tempfile.TemporaryDirectory() as receipts, \
+             mock.patch.object(config, "UNITY_PROJECT_DIR", project), \
+             mock.patch.object(config, "VERIFICATION_RECEIPT_DIR", receipts):
+            success = asyncio.run(
+                agent._run_verification_orchestration(
+                    spec, model_loop_completed, time.monotonic(), True
+                )
+            )
+            with open(agent.last_verification_receipt_path, encoding="utf-8") as handle:
+                receipt = json.load(handle)
+        return success, receipt, agent
+
+    def test_builder_save_barrier_runs_before_first_host_verification(self):
+        success, receipt, agent = self._run_builder_audit([
+            StubContract([], ["gameplay", "movement", "bidirectional", "jump"]),
+        ])
+        self.assertTrue(success)
+        self.assertTrue(receipt["build_stage_success"])
+        self.assertEqual(
+            agent.tools.call_modes[:2],
+            [
+                ("full", "unity_get_state", {}),
+                ("full", "unity_save_scene", {"path": "Assets/Scenes/Test.unity"}),
+            ],
+        )
+        self.assertEqual(len(receipt["attempts"]), 1)
+
+    def test_builder_stage_is_false_when_first_host_verification_needs_repair(self):
+        success, receipt, _ = self._run_builder_audit([
+            StubContract(
+                ["player_did_not_jump"],
+                ["gameplay", "movement", "bidirectional", "jump"],
+            ),
+            StubContract([], ["gameplay", "movement", "bidirectional", "jump"]),
+        ])
+        self.assertTrue(success)
+        self.assertFalse(receipt["build_stage_success"])
+        self.assertEqual(len(receipt["attempts"]), 2)
+
+    def test_builder_stage_uses_first_host_audit_when_model_loop_exhausts(self):
+        success, receipt, _ = self._run_builder_audit(
+            [StubContract([], ["gameplay", "movement", "bidirectional", "jump"])],
+            model_loop_completed=False,
+        )
+        self.assertTrue(success)
+        self.assertTrue(receipt["build_stage_success"])
+
+
 class RegressionDetectionTests(unittest.TestCase):
     """P1 회귀: 최초 측정을 회귀로 오판해 repair 예산을 조기 소진하던 문제.
 
@@ -967,10 +1022,10 @@ class RepairPromptGuidanceTests(unittest.TestCase):
     def test_jump_failure_requires_update_to_fixedupdate_latch(self):
         spec = VerificationSpec.from_request("Space 점프를 구현해줘")
         prompt = fix_prompt(spec, ["player_did_not_jump"], {})
-        self.assertIn("wasPressedThisFrame은 Update에서 읽어", prompt)
+        self.assertIn("spaceKey.isPressed는 Update에서 읽어", prompt)
         self.assertIn("jumpRequested=true", prompt)
         self.assertIn("FixedUpdate에서 isGrounded일 때", prompt)
-        self.assertIn("짧은 입력을 놓칠 수 있다", prompt)
+        self.assertIn("wasPressedThisFrame 전환", prompt)
 
 
 class HostOrchestrationTests(unittest.TestCase):

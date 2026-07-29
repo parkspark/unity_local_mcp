@@ -39,7 +39,17 @@ _LEVEL_WORKFLOW = re.compile(
     r"Assets/StreamingAssets/Levels/|Assets/Scripts/LevelLoader\.cs",
     re.I,
 )
-_INPUT_SIM_WORDS = ("플레이 검증", "조작", "입력 테스트", "입력 시뮬레이", "keyboard", "send_key", "키 입력")
+_ACTION_INPUT_WORKFLOW = re.compile(
+    r"\bplayer\s*input\b|\bplayerinput\b|\binput\s*action\b|\binputaction\b|"
+    r"action\s*map|callback|콜백|액션\s*맵",
+    re.I,
+)
+_INPUT_SIM_WORDS = (
+    "플레이 검증", "조작", "입력 테스트", "입력 시뮬레이",
+    "keyboard", "send_key", "키 입력",
+)
+_BEHAVIOUR_WORDS = ("이동", "점프", "move", "movement", "jump")
+_VERIFICATION_WORDS = ("검증", "확인", "실제로", "verify", "test")
 _SCENE_MUTATIONS = {
     "unity_create_gameobject", "unity_create_gameobjects", "unity_modify_gameobject",
     "unity_delete_gameobject", "unity_add_component", "unity_remove_component",
@@ -98,6 +108,23 @@ def _compile_error_script_paths(result: str) -> set[str]:
     return paths
 
 
+def _direct_keyboard_keys(request: str) -> set[str]:
+    """Extract explicit keyboard controls that need no PlayerInput wiring."""
+    if _ACTION_INPUT_WORKFLOW.search(request):
+        return set()
+    lowered = request.lower()
+    keys: set[str] = set()
+    if re.search(r"(?<![a-z0-9])a\s*[/·]\s*d(?![a-z0-9])", lowered):
+        keys.update({"aKey", "dKey"})
+    if re.search(r"(?<![a-z0-9])wasd(?![a-z0-9])", lowered):
+        keys.update({"wKey", "aKey", "sKey", "dKey"})
+    if "space" in lowered or "스페이스" in lowered:
+        keys.add("spaceKey")
+    if "방향키" in lowered or "arrow key" in lowered:
+        keys.update({"leftArrowKey", "rightArrowKey"})
+    return keys
+
+
 @dataclass
 class TaskContract:
     """Per-request guardrails and machine-checkable verification milestones."""
@@ -130,11 +157,19 @@ class TaskContract:
     active_scene_path: str | None = None
     allow_level_workflow: bool = False
     compile_error_scripts: set[str] = field(default_factory=set)
+    direct_keyboard_keys: set[str] = field(default_factory=set)
+    fresh_scene_requested: bool = False
 
     @classmethod
     def from_request(cls, request: str, known_scripts: Iterable[str] = ()) -> "TaskContract":
         request_lower = request.lower()
-        require_input_sim = any(word in request_lower for word in _INPUT_SIM_WORDS)
+        require_input_sim = (
+            any(word in request_lower for word in _INPUT_SIM_WORDS)
+            or (
+                any(word in request_lower for word in _BEHAVIOUR_WORDS)
+                and any(word in request_lower for word in _VERIFICATION_WORDS)
+            )
+        )
         return cls(
             user_paths={_normalise_path(m.group(0)) for m in _ASSET_PATH.finditer(request)},
             session_scripts=set(known_scripts),
@@ -142,6 +177,11 @@ class TaskContract:
             require_play=require_input_sim,
             require_input_sim=require_input_sim,
             allow_level_workflow=bool(_LEVEL_WORKFLOW.search(request)),
+            direct_keyboard_keys=_direct_keyboard_keys(request),
+            fresh_scene_requested=any(
+                phrase in request_lower
+                for phrase in ("새 빈 씬", "새 씬", "new empty scene", "new scene")
+            ),
         )
 
     @classmethod
@@ -185,6 +225,105 @@ class TaskContract:
             args["path"] = path
             if not path.startswith(_SCRIPT_PREFIX) or not path.lower().endswith(".cs"):
                 return args, "Policy blocked script access: scripts must be under Assets/Scripts/ and end in .cs."
+            if name == "unity_write_script" and self.direct_keyboard_keys:
+                filename = path.rsplit("/", 1)[-1].lower()
+                input_behaviour = any(
+                    marker in filename
+                    for marker in ("player", "movement", "controller", "input", "character")
+                )
+                if input_behaviour:
+                    content = str(args.get("content", ""))
+                    if "spaceKey" in self.direct_keyboard_keys:
+                        # The bridge holds a synthetic key state for several editor
+                        # ticks.  Edge-only reads can be consumed before Update sees
+                        # them, so normalize this mechanically equivalent builder
+                        # mistake before persisting the script.
+                        content = re.sub(
+                            r"(\bspaceKey)\.wasPressedThisFrame\b",
+                            r"\1.isPressed",
+                            content,
+                            flags=re.IGNORECASE,
+                        )
+                        # Fresh scenes do not necessarily define a custom Ground
+                        # tag, and CompareTag throws at runtime when it is absent.
+                        # A simple scene has only the player and its floor, so keep
+                        # the model's collision intent without that project-global
+                        # tag dependency.
+                        content = re.sub(
+                            r"\bcollision\.gameObject\.CompareTag\s*"
+                            r"\(\s*\"Ground\"\s*\)",
+                            "(collision.gameObject != gameObject)",
+                            content,
+                            flags=re.IGNORECASE,
+                        )
+                        args["content"] = content
+                    lowered_content = content.lower()
+                    missing_keys = sorted(
+                        key for key in self.direct_keyboard_keys
+                        if key.lower() not in lowered_content
+                    )
+                    missing_patterns: list[str] = []
+                    if "unityengine.inputsystem" not in lowered_content:
+                        missing_patterns.append("using UnityEngine.InputSystem")
+                    if "keyboard.current" not in lowered_content:
+                        missing_patterns.append("Keyboard.current")
+                    if "linearvelocity" not in lowered_content:
+                        missing_patterns.append("Rigidbody.linearVelocity")
+                    if "spaceKey" in self.direct_keyboard_keys:
+                        update_match = re.search(
+                            r"\bvoid\s+Update\s*\([^)]*\)\s*\{",
+                            content,
+                        )
+                        update_tail = content[update_match.end():] if update_match else ""
+                        next_method = re.search(
+                            r"\n\s*(?:public|private|protected|internal)?\s*"
+                            r"(?:void|bool|float|int|Vector\d?|IEnumerator)\s+\w+\s*\(",
+                            update_tail,
+                        )
+                        update_body = (
+                            update_tail[:next_method.start()]
+                            if next_method else update_tail
+                        )
+                        if (
+                            "spaceKey.isPressed" not in update_body
+                            or not re.search(r"\bjumpRequested\s*=\s*true\b", update_body)
+                        ):
+                            missing_patterns.append(
+                                "Update jumpRequested latch for spaceKey.isPressed"
+                            )
+                        if "fixedupdate" not in lowered_content:
+                            missing_patterns.append("FixedUpdate jump consumption")
+                        collision_grounding = (
+                            "oncollision" in lowered_content
+                            and (
+                                (
+                                    re.search(r"\bcontacts?\b", lowered_content)
+                                    and re.search(r"\.normal(?:\.y)?", lowered_content)
+                                )
+                                or re.search(r"\bisgrounded\s*=\s*true\b", lowered_content)
+                            )
+                        )
+                        if ".bounds" not in lowered_content and not collision_grounding:
+                            missing_patterns.append(
+                                "Collider.bounds or Ground collision check"
+                            )
+                    if re.search(r"\b(?:unityengine\.)?input\.", lowered_content):
+                        missing_patterns.append("no legacy UnityEngine.Input API")
+                    if missing_keys or missing_patterns:
+                        required = ", ".join(sorted(self.direct_keyboard_keys))
+                        details = ", ".join(missing_patterns + missing_keys)
+                        return args, (
+                            f"Policy blocked event-only input script {path}: this request names "
+                            f"simple keyboard controls ({required}). Read Keyboard.current directly "
+                            f"and include every requested key in the behaviour script. Missing: "
+                            f"{details}. Latch a short jump in Update, consume it in FixedUpdate, "
+                            "preserve Y while assigning Rigidbody.linearVelocity, and derive the "
+                            "ground state from Collider.bounds or Ground collision contacts. Do not "
+                            "use the legacy UnityEngine.Input API or create "
+                            "PlayerInput, InputActionAsset, generated controls, OnMove/OnJump "
+                            "callback wiring, or a separate input handler unless the user explicitly "
+                            "requested that architecture."
+                        )
             unscoped_existing = path not in self.user_paths | self.session_scripts
             compiler_proven = path in self.compile_error_scripts
             if name == "unity_delete_script" and unscoped_existing and not compiler_proven:
@@ -202,6 +341,27 @@ class TaskContract:
                     f"Policy blocked {name} for {path}: the user did not explicitly scope this existing script. "
                     "Set UNITY_AGENT_ALLOW_UNSCOPED_SCRIPT_READ=1 to allow read-only inspection; "
                     "delete access remains scoped."
+                )
+
+        if name == "unity_add_component" and self.direct_keyboard_keys:
+            component_name = str(args.get("component_type", "")).rsplit(".", 1)[-1]
+            component = component_name.lower()
+            if component == "playerinput":
+                return args, (
+                    "Policy blocked PlayerInput for explicit simple keyboard controls: "
+                    "read Keyboard.current and the requested keys directly in the player "
+                    "behaviour. PlayerInput/action callback wiring was not requested."
+                )
+            if (
+                self.fresh_scene_requested
+                and component in {"playermovement", "playercontroller", "playerinputhandler"}
+                and f"Assets/Scripts/{component_name}.cs" not in self.session_scripts
+            ):
+                return args, (
+                    f"Policy blocked reuse of {component_name} in a fresh keyboard scene: "
+                    f"write Assets/Scripts/{component_name}.cs in this session first so "
+                    "the direct-key, jump-latch, physics, and compile checks apply to the "
+                    "actual script being attached."
                 )
 
         if name in {"unity_create_scene", "unity_open_scene", "unity_save_scene"}:

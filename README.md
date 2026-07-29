@@ -4,7 +4,7 @@
 ![alt text](data/0703_unity_mcp1.gif)
 
 
-로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.7**이다.
+로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.8**이다.
 기존 [unity_mcp](../unity_mcp) MCP 서버와 Unity 브리지를 재사용하고
 (v1.7부터 send_key 등 일부 확장), Claude Code의 자리를 로컬 모델이 대신한다.
 
@@ -154,7 +154,7 @@ MCP 서버의 21개 도구(`unity_send_key` 포함) 외에, 호스트가 직접 
 |---|---|---|
 | `UNITY_AGENT_MODEL` | `qwen3-coder:30b` | 사용할 Ollama 모델 |
 | `UNITY_AGENT_NUM_CTX` | `32768` | 컨텍스트 길이. VRAM 부족(CPU 분할) 시 16384로 |
-| `UNITY_AGENT_MAX_ITERS` | `15` | 한 턴의 최대 도구 호출 반복 |
+| `UNITY_AGENT_MAX_ITERS` | `30` | 한 턴의 최대 도구 호출 반복 |
 | `UNITY_AGENT_STREAM` | `1` | 스트리밍 중 tool_calls가 안 오면 `0` |
 | `UNITY_AGENT_MODEL_RETRIES` | `1` | EOF·연결 끊김·일시적 서버 오류가 난 모델 호출의 재시도 횟수 |
 | `UNITY_MCP_DIR` | `..\unity_mcp` 절대경로 | MCP 서버 위치 |
@@ -397,3 +397,11 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           짧은 점프 입력 누락, 일시적 Ollama EOF를 고쳤습니다. 최종 영수증은 요청한
           5개 검사를 모두 측정했고 `skipped_checks=[]`를 기록했습니다.
           상세: [docs/v1.11.7_fresh_scene_e2e_reliability.md](docs/v1.11.7_fresh_scene_e2e_reliability.md)
+
+- ver 1.11.8 - **빌더 자체 완결성 확보.** 빌더와 첫 호스트 검증 사이에 정규 씬 저장
+          장벽을 추가하고, 명시적인 A/D·Space 요청은 직접 `Keyboard.current` 구현으로
+          수렴시켰습니다. 짧은 점프 입력과 정의되지 않은 Ground 태그를 결정적으로
+          정규화하고, 브리지는 누른 키 상태를 매 Editor tick 다시 큐잉합니다. 실행 전
+          존재하지 않던 새 씬의 전체 E2E가 repair 없이 첫 검증에서 5/5를 측정해
+          `build_stage_success=true`, `attempts=1`, `skipped_checks=[]`를 기록했습니다.
+          상세: [docs/v1.11.8_builder_stage_completeness.md](docs/v1.11.8_builder_stage_completeness.md)

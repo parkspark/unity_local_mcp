@@ -112,6 +112,196 @@ class TaskContractTests(unittest.TestCase):
         )
         self.assertIn("did not explicitly scope", error)
 
+    def test_explicit_simple_keys_require_direct_keyboard_script(self):
+        contract = TaskContract.from_request(
+            "New Input System으로 A/D 이동과 Space 점프를 구현해줘"
+        )
+        event_script = {
+            "path": "Assets/Scripts/PlayerMovement.cs",
+            "content": (
+                "using UnityEngine.InputSystem; "
+                "class PlayerMovement { void OnMove(InputValue value) {} void OnJump() {} }"
+            ),
+        }
+        _, error = contract.prepare_call("unity_write_script", event_script)
+        self.assertIn("Policy blocked event-only input script", error)
+        self.assertIn("aKey, dKey, spaceKey", error)
+
+        direct_script = {
+            "path": "Assets/Scripts/PlayerMovement.cs",
+            "content": (
+                "using UnityEngine.InputSystem; class PlayerMovement { "
+                "bool jumpRequested; Collider collider; Rigidbody rb; void Update() { "
+                "var keyboard = Keyboard.current; var a = keyboard.aKey; "
+                "var d = keyboard.dKey; if (keyboard.spaceKey.isPressed) "
+                "jumpRequested = true; } void FixedUpdate() { "
+                "rb.linearVelocity = new Vector3(0, rb.linearVelocity.y, 0); "
+                "var bottom = collider.bounds.min; jumpRequested = false; } }"
+            ),
+        }
+        _, error = contract.prepare_call("unity_write_script", direct_script)
+        self.assertIsNone(error)
+
+    def test_direct_keyboard_jump_rejects_fixedupdate_only_edge_read(self):
+        contract = TaskContract.from_request(
+            "A/D 이동과 Space 점프가 실제로 되는지 검증해줘"
+        )
+        _, error = contract.prepare_call(
+            "unity_write_script",
+            {
+                "path": "Assets/Scripts/PlayerMovement.cs",
+                "content": (
+                    "using UnityEngine.InputSystem; class PlayerMovement { "
+                    "Rigidbody rb; Collider collider; void Update() {} "
+                    "void FixedUpdate() { if (Keyboard.current.spaceKey.wasPressedThisFrame) {} "
+                    "if (Keyboard.current.aKey.isPressed || Keyboard.current.dKey.isPressed) {} "
+                    "rb.linearVelocity = Vector3.zero; var bottom = collider.bounds.min; } }"
+                ),
+            },
+        )
+        self.assertIn("Update jumpRequested latch", error)
+
+    def test_direct_keyboard_jump_accepts_collision_contact_grounding(self):
+        contract = TaskContract.from_request(
+            "A/D 이동과 Space 점프가 실제로 되는지 검증해줘"
+        )
+        _, error = contract.prepare_call(
+            "unity_write_script",
+            {
+                "path": "Assets/Scripts/PlayerMovement.cs",
+                "content": (
+                    "using UnityEngine.InputSystem;\n"
+                    "class PlayerMovement {\n"
+                    "bool jumpRequested; Rigidbody rb;\n"
+                    "void Update() { var k = Keyboard.current; var a = k.aKey; "
+                    "var d = k.dKey; if (k.spaceKey.isPressed) jumpRequested = true; }\n"
+                    "void FixedUpdate() { rb.linearVelocity = Vector3.zero; "
+                    "jumpRequested = false; }\n"
+                    "void OnCollisionStay(Collision collision) { foreach "
+                    "(ContactPoint contact in collision.contacts) { "
+                    "if (contact.normal.y > 0.5f) {} } }\n"
+                    "}"
+                ),
+            },
+        )
+        self.assertIsNone(error)
+
+    def test_direct_keyboard_jump_normalizes_short_edge_read(self):
+        contract = TaskContract.from_request(
+            "A/D 이동과 Space 점프가 실제로 되는지 검증해줘"
+        )
+        prepared, error = contract.prepare_call(
+            "unity_write_script",
+            {
+                "path": "Assets/Scripts/PlayerMovement.cs",
+                "content": (
+                    "using UnityEngine.InputSystem;\n"
+                    "class PlayerMovement {\n"
+                    "bool jumpRequested; Rigidbody rb;\n"
+                    "void Update() { var k = Keyboard.current; var a = k.aKey; "
+                    "var d = k.dKey; if (k.spaceKey.wasPressedThisFrame) "
+                    "jumpRequested = true; }\n"
+                    "void FixedUpdate() { rb.linearVelocity = Vector3.zero; "
+                    "jumpRequested = false; }\n"
+                    "void OnCollisionEnter(Collision collision) { "
+                    "if (collision.gameObject.CompareTag(\"Ground\")) "
+                    "{ isGrounded = true; } }\n"
+                    "}"
+                ),
+            },
+        )
+        self.assertIsNone(error)
+        self.assertIn("spaceKey.isPressed", prepared["content"])
+        self.assertNotIn("spaceKey.wasPressedThisFrame", prepared["content"])
+        self.assertIn("collision.gameObject != gameObject", prepared["content"])
+        self.assertNotIn('CompareTag("Ground")', prepared["content"])
+
+    def test_direct_keyboard_script_rejects_legacy_input_api_mixing(self):
+        contract = TaskContract.from_request(
+            "A/D 이동과 Space 점프가 실제로 되는지 검증해줘"
+        )
+        _, error = contract.prepare_call(
+            "unity_write_script",
+            {
+                "path": "Assets/Scripts/PlayerMovement.cs",
+                "content": (
+                    "using UnityEngine.InputSystem;\n"
+                    "class PlayerMovement {\n"
+                    "bool jumpRequested; Rigidbody rb; Collider collider;\n"
+                    "void Update() { var k = Keyboard.current; var a = k.aKey; "
+                    "var d = k.dKey; var old = Input.GetAxis(\"Horizontal\"); "
+                    "if (k.spaceKey.isPressed) jumpRequested = true; }\n"
+                    "void FixedUpdate() { rb.linearVelocity = Vector3.zero; "
+                    "var bottom = collider.bounds.min; jumpRequested = false; }\n"
+                    "}"
+                ),
+            },
+        )
+        self.assertIn("no legacy UnityEngine.Input API", error)
+
+    def test_fresh_keyboard_scene_must_write_custom_movement_before_attach(self):
+        contract = TaskContract.from_request(
+            "Assets/Scenes/Fresh.unity에 새 빈 씬을 만들고 A/D 이동과 Space 점프를 구현해줘"
+        )
+        _, error = contract.prepare_call(
+            "unity_add_component",
+            {"target": "Player", "component_type": "PlayerMovement"},
+        )
+        self.assertIn("Policy blocked reuse of PlayerMovement", error)
+
+        write_args = {
+            "path": "Assets/Scripts/PlayerMovement.cs",
+            "content": (
+                "using UnityEngine.InputSystem; class PlayerMovement { "
+                "bool jumpRequested; Rigidbody rb; Collider collider; void Update() { "
+                "var k = Keyboard.current; var a = k.aKey; var d = k.dKey; "
+                "if (k.spaceKey.isPressed) jumpRequested = true; } "
+                "void FixedUpdate() { rb.linearVelocity = Vector3.zero; "
+                "var bottom = collider.bounds.min; jumpRequested = false; } }"
+            ),
+        }
+        write_args, error = contract.prepare_call("unity_write_script", write_args)
+        self.assertIsNone(error)
+        contract.observe("unity_write_script", write_args, OK)
+        _, error = contract.prepare_call(
+            "unity_add_component",
+            {"target": "Player", "component_type": "PlayerMovement"},
+        )
+        self.assertIsNone(error)
+
+    def test_behaviour_verification_request_requires_builder_input_measurement(self):
+        contract = TaskContract.from_request(
+            "이동과 점프가 실제로 되는지 검증까지 끝내줘"
+        )
+        self.assertTrue(contract.require_play)
+        self.assertTrue(contract.require_input_sim)
+
+    def test_explicit_simple_keys_block_unrequested_playerinput_component(self):
+        contract = TaskContract.from_request("A/D 이동과 Space 점프를 구현해줘")
+        _, error = contract.prepare_call(
+            "unity_add_component",
+            {"target": "Player", "component_type": "UnityEngine.InputSystem.PlayerInput"},
+        )
+        self.assertIn("Policy blocked PlayerInput", error)
+
+    def test_explicit_playerinput_architecture_is_not_forced_to_direct_reads(self):
+        contract = TaskContract.from_request(
+            "PlayerInput과 InputAction 콜백으로 A/D 이동과 Space 점프를 구현해줘"
+        )
+        _, error = contract.prepare_call(
+            "unity_write_script",
+            {
+                "path": "Assets/Scripts/PlayerMovement.cs",
+                "content": "class PlayerMovement { void OnMove() {} void OnJump() {} }",
+            },
+        )
+        self.assertIsNone(error)
+        _, error = contract.prepare_call(
+            "unity_add_component",
+            {"target": "Player", "component_type": "PlayerInput"},
+        )
+        self.assertIsNone(error)
+
     def test_pathless_save_uses_observed_active_scene_path(self):
         contract = TaskContract.from_request("현재 씬을 수정해줘")
         contract.observe("unity_get_state", {}, json.dumps({

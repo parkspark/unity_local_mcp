@@ -19,7 +19,7 @@ STREAM = os.environ.get("UNITY_AGENT_STREAM", "1") != "0"
 MODEL_CALL_RETRIES = int(os.environ.get("UNITY_AGENT_MODEL_RETRIES", "1"))
 
 # 에이전트 루프
-MAX_ITERS = int(os.environ.get("UNITY_AGENT_MAX_ITERS", "15"))
+MAX_ITERS = int(os.environ.get("UNITY_AGENT_MAX_ITERS", "30"))
 TRUNCATE_CHARS = int(os.environ.get("UNITY_AGENT_TRUNCATE_CHARS", "4000"))
 # 한 턴에서 같은 툴이 이 횟수만큼 호출되면 배치/스크립트 사용을 권고. 0이면 끔.
 LOOP_GUARD_THRESHOLD = int(os.environ.get("UNITY_AGENT_LOOP_GUARD", "4"))

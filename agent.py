@@ -47,7 +47,7 @@ Writing C# scripts:
 - The C# class name MUST match the file name. Before modifying an existing script, read it first with unity_read_script.
 - ALWAYS place scripts under Assets/Scripts/. Before creating a new script, check it does not already exist elsewhere (unity_list_assets filter "t:Script"). Two files defining the same class break ALL compilation in the project.
 - To remove a stale, duplicate, or conflicting script that breaks compilation, DELETE it with unity_delete_script (do NOT just leave it or try to work around it), then unity_refresh_assets to recompile.
-- This project uses the NEW Input System ONLY. NEVER use the legacy UnityEngine.Input API (Input.GetAxis, Input.GetButtonDown, Input.GetKey...) — it throws InvalidOperationException at runtime. Instead `using UnityEngine.InputSystem;` and read `Keyboard.current` / `Mouse.current` / `Gamepad.current`, e.g. `keyboard.aKey.isPressed`, `keyboard.spaceKey.wasPressedThisFrame`. Always null-check `Keyboard.current` first. For simple keyboard gameplay, read `Keyboard.current` directly and do NOT create or add PlayerInput, InputActionAsset, generated controls, or callback handler components; direct device reads need none of them and unwired action components swallow the task budget without delivering input.
+- This project uses the NEW Input System ONLY. NEVER use the legacy UnityEngine.Input API (Input.GetAxis, Input.GetButtonDown, Input.GetKey...) — it throws InvalidOperationException at runtime. Instead `using UnityEngine.InputSystem;` and read `Keyboard.current` / `Mouse.current` / `Gamepad.current`, e.g. `keyboard.aKey.isPressed`. Always null-check `Keyboard.current` first. For a short jump tap, read `keyboard.spaceKey.isPressed` in Update, latch `jumpRequested`, and consume it in FixedUpdate; do not rely on `wasPressedThisFrame`, whose queued edge can be gone before gameplay Update observes it. For simple keyboard gameplay, read `Keyboard.current` directly and do NOT create or add PlayerInput, InputActionAsset, generated controls, or callback handler components; direct device reads need none of them and unwired action components swallow the task budget without delivering input.
 - Unity 6 renamed APIs — obsolete names trigger a blocking editor dialog. Use `rb.linearVelocity` (NOT `rb.velocity`) and `Object.FindFirstObjectByType<T>()` (NOT `FindObjectOfType<T>()`).
 
 Data-driven levels (games with stages/levels):
@@ -918,16 +918,88 @@ class Agent:
             paths.append(spec.scene_path)
         return paths
 
+    async def _builder_save_barrier(
+        self, spec: VerificationSpec, build_success: bool | None
+    ) -> None:
+        """Persist the canonical active scene before the builder's first audit.
+
+        Scene saving is deterministic orchestration, not creative repair. A
+        model that spent its final iteration creating an object must not enter
+        host verification with an avoidably dirty scene, but the barrier never
+        changes the scene target or turns a failed first audit into builder
+        success.
+        """
+        if (
+            build_success is None
+            or not spec.scene_path
+            or self._turn_mutation_count == 0
+        ):
+            return
+        if hasattr(self.tools, "set_tool_mode"):
+            self.tools.set_tool_mode("full")
+        self._active_tool_mode = "full"
+        state_args: dict = {}
+        state_result = await self.tools.call("unity_get_state", state_args)
+        self.on_tool("unity_get_state", state_args, state_result)
+        try:
+            state, _end = json.JSONDecoder().raw_decode(state_result.lstrip())
+            result = state.get("result", {})
+            active_path = str(
+                result.get("activeScene", {}).get("path", "")
+            ).replace("\\", "/").lstrip("/")
+            is_playing = bool(state.get("status") == "ok" and result.get("isPlaying"))
+        except (TypeError, ValueError, AttributeError):
+            active_path = ""
+            is_playing = False
+        canonical = spec.scene_path.replace("\\", "/").lstrip("/")
+        if active_path != canonical:
+            self._log(
+                "builder_save_barrier_skipped",
+                reason="wrong_active_scene",
+                active_scene=active_path,
+                canonical_scene=canonical,
+            )
+            return
+        if is_playing:
+            stop_args = {"action": "stop"}
+            stop_result = await self.tools.call("unity_play_mode", stop_args)
+            self.on_tool("unity_play_mode", stop_args, stop_result)
+            await asyncio.sleep(0.5)
+        save_args = {"path": spec.scene_path}
+        save_result = await self.tools.call("unity_save_scene", save_args)
+        self.on_tool("unity_save_scene", save_args, save_result)
+        self._log(
+            "builder_save_barrier",
+            path=spec.scene_path,
+            model_loop_completed=bool(build_success),
+            result=save_result,
+        )
+
     async def _run_verification_orchestration(
         self, spec: VerificationSpec, build_success: bool | None,
         started: float, allow_fix: bool,
     ) -> bool:
         """Verify, repair only failed checks in fresh contexts, then reverify."""
         attempts: list[dict] = []
+        await self._builder_save_barrier(spec, build_success)
         contract = await self._collect_verification(spec)
         failures = contract.failures()
         if build_success is not None and self._turn_mutation_count == 0:
             failures.append("builder_produced_no_mutation_evidence")
+        # Builder completeness is an artifact property: did the state handed to
+        # the first independent host audit pass without repair?  The local model
+        # may exhaust its narration/self-check loop after already producing a
+        # clean artifact, so its loop return is diagnostic rather than part of
+        # this receipt verdict.
+        builder_stage_success = (
+            None if build_success is None else not failures
+        )
+        self._log(
+            "builder_stage_evaluated",
+            model_loop_completed=build_success,
+            first_verification_failures=failures,
+            build_stage_success=builder_stage_success,
+        )
         attempts.append({
             "phase": "verify", "attempt": 1,
             "failures": failures, "evidence": contract.evidence(),
@@ -991,6 +1063,12 @@ class Agent:
             fix_contract = TaskContract.from_request(
                 "\n".join(repair_scope), self.known_session_scripts
             )
+            # Host orchestration performs the authoritative runtime/input
+            # remeasurement immediately after this loop. Evidence JSON contains
+            # words such as movement/test that must not force the repair model
+            # to spend its iteration budget duplicating that full measurement.
+            fix_contract.require_play = False
+            fix_contract.require_input_sim = False
             messages = [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": fix_prompt(spec, failures, evidence)},
@@ -1215,7 +1293,7 @@ class Agent:
         try:
             receipt = write_receipt(
                 config.VERIFICATION_RECEIPT_DIR, spec, status, contract.evidence(),
-                failures, attempts, time.monotonic() - started, build_success,
+                failures, attempts, time.monotonic() - started, builder_stage_success,
                 check_report,
             )
             self.last_verification_receipt_path = receipt
