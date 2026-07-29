@@ -4,7 +4,7 @@
 ![alt text](data/0703_unity_mcp1.gif)
 
 
-로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.2**이다.
+로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.5**이다.
 기존 [unity_mcp](../unity_mcp) MCP 서버와 Unity 브리지를 재사용하고
 (v1.7부터 send_key 등 일부 확장), Claude Code의 자리를 로컬 모델이 대신한다.
 
@@ -178,6 +178,7 @@ MCP 서버의 21개 도구(`unity_send_key` 포함) 외에, 호스트가 직접 
 | `UNITY_AGENT_TASK_TIMEOUT` | `1800` | 검증·자동 수정 전체 시간 예산(초). 무한 반복 대신 사용 (v1.9) |
 | `UNITY_AGENT_NO_PROGRESS_LIMIT` | `2` | 같은 실패 집합이 반복될 때 조기 중단하는 횟수 (v1.9) |
 | `UNITY_AGENT_RECEIPT_DIR` | `logs/receipts` | 검증 영수증 JSON 루트 경로 (v1.9) |
+| `UNITY_AGENT_REPAIR_ROLLBACK` | `1` | 자동 수정이 상태를 악화시키면 최선 사이클의 파일로 되돌림 (v1.11.5) |
 
 ### 실행 로그 (v1.8)
 
@@ -350,3 +351,32 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           영수증 전수 조사 결과 기존 `verified` 3건이 전부 Play Mode 미실행 상태였습니다.
           상세: [변경 내용](docs/v1.11.2_verification_spec_reliability.md) ·
           [진행 현황 보고서](docs/v1.11.2_status_and_improvement_report.md)
+
+- ver 1.11.3 - **repair 회귀 오판 수정(P1).** 실측 E2E에서 자동 수정이 3회 예산 중
+          1회 만에 중단되던 문제를 고쳤습니다. 컴파일·컴포넌트가 고쳐져 게임플레이가
+          **처음으로 측정 가능해진 것**을 "새로 생긴 실패"로 보고 회귀 판정하던 것이
+          원인입니다. 이제 이전 사이클의 `measured_checks`를 기준으로 최초 측정과
+          진짜 회귀를 구분하고, `compile_errors:3 → 1` 같은 개수 감소도 진전으로
+          인정합니다. 재실행 결과 repair가 3회 예산을 완주하며 점프 버그를 실제로
+          수정했고, 통과하던 검사가 깨지자 정확히 회귀로 중단했습니다.
+          상세: [docs/v1.11.3_repair_regression_detection.md](docs/v1.11.3_repair_regression_detection.md)
+
+- ver 1.11.4 - **이동 검증 공백 수정 — 프로젝트 최초의 정당한 `verified` 달성.**
+          두 결함을 고쳤습니다. ① 이동 검사에 하한만 있어 매 FixedUpdate의 누적
+          `AddForce(Impulse)`로 1초에 131유닛을 이동하는 폭주 물리가 통과하던 문제 →
+          속도 기반 상한(`movement_max_speed=25`) 도입. ② 요청은 "A/D 이동"인데
+          검증은 `rightArrow`를 하드코딩해 정상 동작하는 게임을 실패시키던 문제 →
+          요청에서 제어 방식을 추출해 해당 키로 검증하고, A/D·방향키 표본을 서로
+          인정합니다. 재실행 결과 1차에서 폭주를 잡고 repair가 이를 고쳐
+          **`measured_checks`가 모두 채워진 `verified`**를 처음으로 기록했습니다
+          (D 이동 126→5.0, 점프 최고점 1.1→6.07).
+          상세: [docs/v1.11.4_movement_verification_gaps.md](docs/v1.11.4_movement_verification_gaps.md)
+
+- ver 1.11.5 - **repair snapshot/rollback(P1).** 자동 수정이 한 버그를 고치면서 다른
+          버그를 만들면 더 나쁜 마지막 상태가 프로젝트에 남던 문제를 해결했습니다.
+          매 검증 직후 상태를 점수화해 최선 시점의 파일(`Assets/Scripts`, 레벨 JSON,
+          씬)을 스냅샷하고, 루프가 최선보다 나쁘게 끝나면 되돌린 뒤 **재검증해서**
+          영수증이 실제 상태를 기술하도록 합니다. 구현 중 실측에서 `no_verification_progress`
+          같은 루프 마커를 결함으로 세어 모델의 올바른 수정을 되돌리는 거짓 롤백을
+          발견해 함께 고쳤습니다. `UNITY_AGENT_REPAIR_ROLLBACK=0`으로 끌 수 있습니다.
+          상세: [docs/v1.11.5_repair_rollback.md](docs/v1.11.5_repair_rollback.md)

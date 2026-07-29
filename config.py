@@ -97,6 +97,8 @@ FIX_MAX_CYCLES = int(os.environ.get("UNITY_AGENT_FIX_CYCLES", "3"))
 FIX_MAX_ITERS = int(os.environ.get("UNITY_AGENT_FIX_ITERS", "20"))
 TASK_TIMEOUT_SECONDS = float(os.environ.get("UNITY_AGENT_TASK_TIMEOUT", "1800"))
 NO_PROGRESS_LIMIT = int(os.environ.get("UNITY_AGENT_NO_PROGRESS_LIMIT", "2"))
+# Restore the best-measured project state when repair ends worse than it got.
+REPAIR_ROLLBACK = os.environ.get("UNITY_AGENT_REPAIR_ROLLBACK", "1") != "0"
 VERIFICATION_RECEIPT_DIR = os.path.abspath(os.environ.get(
     "UNITY_AGENT_RECEIPT_DIR",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "receipts"),

@@ -11,13 +11,15 @@ import ollama
 
 import config
 import planner
+import snapshot
 from preflight import inspect_request
 from mcp_client import UnityTools
 from policy_lint import apply_safe_repairs
 from run_logging import RunLogger
 from task_contract import TaskContract
 from verification import (
-    MUTATION_TOOLS, VerificationContract, VerificationSpec, fix_prompt, write_receipt,
+    MUTATION_TOOLS, VerificationContract, VerificationSpec, failure_check_name,
+    failure_count, fix_prompt, write_receipt,
 )
 
 SYSTEM_PROMPT = """\
@@ -731,8 +733,24 @@ class Agent:
                     elif contract.idle_after[1] < contract.idle_before[1] - 2:
                         for stage in ("movement", "jump", "boost", "camera"):
                             contract.block(stage, "player_fell_during_spawn_check")
-                if spec.require_movement:
-                    await measure_motion("rightArrow", "rightArrow", 0.5)
+                if spec.require_movement and not (
+                    spec.require_bidirectional and spec.move_right_key == "d"
+                ):
+                    # Skipped when the bidirectional pass already presses the
+                    # same key — failures() accepts either sample.
+                    await measure_motion("rightArrow", spec.move_right_key, 0.5)
+                    moved = contract.rightward_delta()
+                    if (
+                        not spec.movement_keys_explicit
+                        and moved is not None
+                        and moved <= 1e-3
+                        and "movement" not in contract.blocked_by
+                    ):
+                        # The request named no control scheme, so a still player
+                        # may just mean the game reads the other common one.
+                        alternate = "d" if spec.move_right_key != "d" else "rightArrow"
+                        self._log("movement_key_fallback", key=alternate)
+                        await measure_motion("rightArrow", alternate, 0.5)
                 if spec.require_bidirectional:
                     await measure_motion("d", "d", spec.movement_duration)
                     await measure_motion("a", "a", spec.movement_duration)
@@ -809,6 +827,39 @@ class Agent:
         )
         return contract
 
+    # Loop-control outcomes, not defects in the project's files. Counting them
+    # made a cycle look worse than it was and rolled back a correct repair.
+    _ORCHESTRATION_MARKERS = frozenset({
+        "no_verification_progress", "task_time_budget_exhausted",
+        "verification_regressed", "verification_rolled_back",
+        "verification_spec_empty", "builder_produced_no_mutation_evidence",
+    })
+
+    @classmethod
+    def _repair_score(cls, failures: list[str]) -> tuple[int, int]:
+        """Rank a measured project state: fewer real defects first, then total.
+
+        Used only to decide which cycle's files to keep, never to declare
+        success — an empty failure list is still what verification requires.
+        """
+        state, blocked = 0, 0
+        for item in failures:
+            if item in cls._ORCHESTRATION_MARKERS:
+                continue
+            if item.startswith("blocked:"):
+                blocked += 1
+            else:
+                state += 1
+        # Tie-break on blocked measurements: a state where more could actually
+        # be measured is the better one to keep.
+        return state, blocked
+
+    def _snapshot_paths(self, spec: VerificationSpec) -> list[str]:
+        paths = list(spec.asset_paths)
+        if spec.scene_path:
+            paths.append(spec.scene_path)
+        return paths
+
     async def _run_verification_orchestration(
         self, spec: VerificationSpec, build_success: bool | None,
         started: float, allow_fix: bool,
@@ -823,7 +874,19 @@ class Agent:
             "phase": "verify", "attempt": 1,
             "failures": failures, "evidence": contract.evidence(),
         })
+        # Remember the best state seen so a later cycle cannot leave the project
+        # worse than repair already had it.
+        best_snapshot = None
+        best_score = self._repair_score(failures)
+        best_label = "verify 1"
+        if config.REPAIR_ROLLBACK and allow_fix and failures:
+            best_snapshot = snapshot.capture(
+                config.UNITY_PROJECT_DIR, best_label, self._snapshot_paths(spec)
+            )
         previous_failures = set(failures)
+        # Which checks actually produced a measurement. A check that was blocked
+        # before cannot "regress" — its first failing measurement is a discovery.
+        previous_measured = set(contract.measured_checks())
         stagnant = 0
 
         for cycle in range(1, config.FIX_MAX_CYCLES + 1):
@@ -932,27 +995,68 @@ class Agent:
                 "phase": "reverify", "attempt": cycle + 1,
                 "failures": failures, "evidence": contract.evidence(),
             })
+            if config.REPAIR_ROLLBACK and failures:
+                score = self._repair_score(failures)
+                if score < best_score:
+                    best_score = score
+                    best_label = f"reverify {cycle + 1}"
+                    best_snapshot = snapshot.capture(
+                        config.UNITY_PROJECT_DIR, best_label, self._snapshot_paths(spec)
+                    )
+                    self._log(
+                        "verification_best_state", label=best_label,
+                        score=list(score), files=len(best_snapshot),
+                    )
             current_failures = set(failures)
+            current_measured = set(contract.measured_checks())
             resolved = sorted(previous_failures - current_failures)
             introduced = sorted(current_failures - previous_failures)
             persisted = sorted(current_failures & previous_failures)
-            self._log(
-                "verification_failure_delta",
-                cycle=cycle,
-                resolved=resolved,
-                introduced=introduced,
-                persisted=persisted,
-            )
             critical_prefixes = (
                 "asset_missing:", "compile_errors:", "runtime_errors:",
                 "wrong_active_scene:", "scene_not_saved", "component_missing:",
                 "player_did_not_", "d_did_not_", "a_did_not_",
                 "camera_did_not_", "boost_distance_", "left_boost_distance_",
                 "idle_drift_", "player_did_not_land",
+                "player_moved_too_far", "d_moved_too_far", "a_moved_too_far",
             )
-            critical_new = [
-                item for item in introduced if item.startswith(critical_prefixes)
-            ]
+            previous_counts = dict(
+                counted for item in previous_failures
+                if (counted := failure_count(item))
+            )
+            critical_new: list[str] = []
+            first_measurements: list[str] = []
+            improved_counts: list[str] = []
+            for item in introduced:
+                if not item.startswith(critical_prefixes):
+                    continue
+                counted = failure_count(item)
+                # "compile_errors:3" → "compile_errors:1" is progress even though
+                # the exact string is new. Only a rising count is a regression.
+                if counted is not None:
+                    head, count = counted
+                    before = previous_counts.get(head)
+                    if before is not None and count <= before:
+                        improved_counts.append(item)
+                        continue
+                check = failure_check_name(item)
+                # Repairing a compile error or a missing Rigidbody unblocks
+                # gameplay checks for the first time. Their failing measurement
+                # is what repair exists to fix, not a reason to stop.
+                if check is not None and check not in previous_measured:
+                    first_measurements.append(item)
+                    continue
+                critical_new.append(item)
+            self._log(
+                "verification_failure_delta",
+                cycle=cycle,
+                resolved=resolved,
+                introduced=introduced,
+                persisted=persisted,
+                first_measurements=first_measurements,
+                improved_counts=improved_counts,
+                newly_measured=sorted(current_measured - previous_measured),
+            )
             if critical_new:
                 failures.append("verification_regressed")
                 self._log(
@@ -967,6 +1071,42 @@ class Agent:
             else:
                 stagnant = 0
             previous_failures = current_failures
+            previous_measured = current_measured
+
+        # Repair can trade one bug for another. If it ended worse than it got,
+        # put the best measured state back so the project is never left
+        # degraded by an automatic fix.
+        if (
+            config.REPAIR_ROLLBACK
+            and best_snapshot is not None
+            and failures
+            and self._repair_score(failures) > best_score
+        ):
+            restored = snapshot.restore(best_snapshot, config.UNITY_PROJECT_DIR)
+            self._log(
+                "verification_rollback",
+                to=best_label,
+                best_score=list(best_score),
+                final_score=list(self._repair_score(failures)),
+                restored=restored,
+            )
+            if restored:
+                self.on_warn(
+                    f"자동 수정이 상태를 악화시켜 '{best_label}' 시점으로 되돌렸습니다 "
+                    f"({len(restored)}개 파일)."
+                )
+                refresh = await self.tools.call("unity_refresh_assets", {})
+                self.on_tool("unity_refresh_assets", {}, refresh)
+                # Report what the project actually contains now, not the state
+                # that was just discarded.
+                contract = await self._collect_verification(spec)
+                failures = contract.failures()
+                failures.append("verification_rolled_back")
+                attempts.append({
+                    "phase": "rollback", "attempt": len(attempts) + 1,
+                    "restored_from": best_label, "restored_files": restored,
+                    "failures": failures, "evidence": contract.evidence(),
+                })
 
         success = not failures
         status = "verified" if success else "failed"
@@ -1000,6 +1140,11 @@ class Agent:
                 "\n❌ 완료로 판정하지 않았습니다. 미통과: "
                 + ", ".join(failures)
             )
+            if "verification_rolled_back" in failures:
+                report += (
+                    f"\n자동 수정이 상태를 악화시켜 '{best_label}' 시점으로 되돌렸습니다. "
+                    "프로젝트에는 이번 실행에서 측정된 가장 나은 상태가 남아 있습니다."
+                )
             if skipped:
                 report += f"\n측정하지 못한 검증 항목: {', '.join(skipped)}"
         if receipt:

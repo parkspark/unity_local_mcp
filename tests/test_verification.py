@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -10,7 +11,10 @@ from agent import Agent
 from local_tools import wait_seconds
 from preflight import inspect_request
 from policy_lint import apply_safe_repairs, lint_scripts
-from verification import VerificationContract, VerificationSpec, write_receipt
+from verification import (
+    VerificationContract, VerificationSpec, failure_check_name, failure_count,
+    write_receipt,
+)
 from version import __version__
 
 
@@ -395,6 +399,369 @@ class RepairAgent(Agent):
         if content:
             self.on_text(content)
         return content, calls
+
+
+class MovementSpecTests(unittest.TestCase):
+    """v1.11.4 회귀: 검증이 요청에 없는 키를 쓰거나 폭주 물리를 통과시키던 문제."""
+
+    def test_ad_scheme_is_extracted_from_request(self):
+        spec = VerificationSpec.from_request(
+            "New Input System으로 A/D 좌우 이동과 Space 점프가 되도록 구현해줘"
+        )
+        self.assertEqual(spec.move_right_key, "d")
+        self.assertEqual(spec.move_left_key, "a")
+        self.assertTrue(spec.movement_keys_explicit)
+
+    def test_arrow_scheme_is_extracted(self):
+        spec = VerificationSpec.from_request("방향키로 좌우 이동하게 만들어줘")
+        self.assertEqual(spec.move_right_key, "rightArrow")
+        self.assertTrue(spec.movement_keys_explicit)
+
+    def test_unspecified_scheme_is_not_explicit(self):
+        spec = VerificationSpec.from_request("플랫포머 게임 만들어줘")
+        self.assertEqual(spec.move_right_key, "rightArrow")
+        self.assertFalse(spec.movement_keys_explicit)
+
+    def _movement_contract(self, request, project, label, before, after):
+        spec = VerificationSpec.from_request(request)
+        contract = VerificationContract(spec, project)
+        contract.state_seen = True
+        contract.scene_clean = True
+        contract.compile_checked = True
+        contract.played = contract.waited = contract.runtime_checked = True
+        contract.play_active_confirmed = True
+        contract.input_released = contract.final_stopped = True
+        contract.observed_components["Player"] = [
+            "UnityEngine.Rigidbody", "UnityEngine.CapsuleCollider",
+        ]
+        contract.motion_before[label] = before
+        contract.motion_after[label] = after
+        contract.motion_duration[label] = 1.0
+        return contract
+
+    def test_runaway_movement_is_rejected(self):
+        """실측 E2E에서 1초에 131유닛 이동이 통과하던 문제."""
+        with tempfile.TemporaryDirectory() as project:
+            contract = self._movement_contract(
+                "플랫포머에서 이동을 고쳐줘", project,
+                "rightArrow", (0.0, 1.0, 0.0), (131.8, 1.0, 0.0),
+            )
+            self.assertIn("player_moved_too_far", contract.failures())
+
+    def test_plausible_movement_passes(self):
+        with tempfile.TemporaryDirectory() as project:
+            contract = self._movement_contract(
+                "플랫포머에서 이동을 고쳐줘", project,
+                "rightArrow", (0.0, 1.0, 0.0), (5.0, 1.0, 0.0),
+            )
+            failures = contract.failures()
+            self.assertNotIn("player_moved_too_far", failures)
+            self.assertNotIn("player_did_not_move_right", failures)
+
+    def test_ad_request_accepts_the_d_sample_for_movement(self):
+        """A/D 요청에서 rightArrow 표본이 없어도 d 표본으로 이동을 인정한다."""
+        with tempfile.TemporaryDirectory() as project:
+            contract = self._movement_contract(
+                "A/D 좌우 이동을 고쳐줘", project,
+                "d", (0.0, 1.0, 0.0), (4.0, 1.0, 0.0),
+            )
+            contract.motion_before["a"] = (4.0, 1.0, 0.0)
+            contract.motion_after["a"] = (0.0, 1.0, 0.0)
+            contract.motion_duration["a"] = 1.0
+            failures = contract.failures()
+            self.assertNotIn("player_did_not_move_right", failures)
+            self.assertNotIn("player_movement_not_measured", failures)
+
+    def test_runaway_bidirectional_movement_is_rejected(self):
+        with tempfile.TemporaryDirectory() as project:
+            contract = self._movement_contract(
+                "A/D 좌우 이동을 고쳐줘", project,
+                "d", (0.0, 1.0, 0.0), (126.7, 1.0, 0.0),
+            )
+            contract.motion_before["a"] = (126.7, 1.0, 0.0)
+            contract.motion_after["a"] = (-5.1, 1.0, 0.0)
+            contract.motion_duration["a"] = 1.0
+            failures = contract.failures()
+            self.assertIn("d_moved_too_far", failures)
+            self.assertIn("a_moved_too_far", failures)
+
+    def test_moved_too_far_maps_to_its_check(self):
+        self.assertEqual(failure_check_name("player_moved_too_far"), "movement")
+        self.assertEqual(failure_check_name("d_moved_too_far"), "bidirectional")
+        self.assertEqual(failure_check_name("a_moved_too_far"), "bidirectional")
+
+
+class StubContract:
+    """Minimal stand-in so a repair cycle can be driven without Unity."""
+
+    def __init__(self, failures, measured):
+        self._failures = list(failures)
+        self._measured = list(measured)
+
+    def failures(self):
+        return list(self._failures)
+
+    def measured_checks(self):
+        return list(self._measured)
+
+    def evidence(self):
+        return {}
+
+    def check_report(self):
+        return {
+            "requested_checks": self._measured,
+            "measured_checks": self._measured,
+            "skipped_checks": [],
+        }
+
+
+class ScriptedVerificationAgent(Agent):
+    """Replays a fixed sequence of verification outcomes across repair cycles."""
+
+    def __init__(self, contracts, edits=None):
+        super().__init__(
+            HostTools(), lambda *_: None, lambda *_: None, lambda *_: None,
+            enable_logging=False, enable_verification=True,
+        )
+        self.contracts = iter(contracts)
+        # Per-cycle file writes so a rollback has something real to undo.
+        self.edits = iter(edits or [])
+        self._turn_mutation_count = 1  # repair loop demands mutation evidence
+        self.cycles_run = 0
+
+    async def _collect_verification(self, spec):
+        return next(self.contracts)
+
+    async def _react_loop(self, messages, contract, max_iters, ledger=None):
+        self.cycles_run += 1
+        edit = next(self.edits, None)
+        if edit:
+            path = os.path.join(config.UNITY_PROJECT_DIR, "Assets", "Scripts", "Player.cs")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(edit)
+        return True, "", 1
+
+
+def _run_orchestration(contracts, request="점프를 고쳐줘", edits=None, seed=None):
+    spec = VerificationSpec.from_request(request)
+    agent = ScriptedVerificationAgent(contracts, edits)
+    with tempfile.TemporaryDirectory() as project, \
+         tempfile.TemporaryDirectory() as receipts, \
+         mock.patch.object(config, "UNITY_PROJECT_DIR", project), \
+         mock.patch.object(config, "VERIFICATION_RECEIPT_DIR", receipts):
+        if seed is not None:
+            path = os.path.join(project, "Assets", "Scripts", "Player.cs")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(seed)
+        success = asyncio.run(
+            agent._run_verification_orchestration(spec, None, time.monotonic(), True)
+        )
+        receipt = json.load(open(agent.last_verification_receipt_path, encoding="utf-8"))
+        final_script = None
+        script_path = os.path.join(project, "Assets", "Scripts", "Player.cs")
+        if os.path.exists(script_path):
+            with open(script_path, encoding="utf-8") as handle:
+                final_script = handle.read()
+    return success, receipt, agent, final_script
+
+
+class RegressionDetectionTests(unittest.TestCase):
+    """P1 회귀: 최초 측정을 회귀로 오판해 repair 예산을 조기 소진하던 문제.
+
+    실측 E2E(20260729_094913)에서 repair 1회 만에 verification_regressed로
+    중단됐다. 원인은 compile/Rigidbody가 고쳐져 점프·이동이 '처음으로 측정
+    가능해진' 것을 '새로 생긴 실패'로 본 것이다.
+    """
+
+    def test_failure_check_name_maps_behaviour_failures(self):
+        self.assertEqual(failure_check_name("player_did_not_jump"), "jump")
+        self.assertEqual(failure_check_name("player_did_not_land"), "jump_landing")
+        self.assertEqual(failure_check_name("player_did_not_move_right"), "movement")
+        self.assertEqual(failure_check_name("d_did_not_move_right"), "bidirectional")
+        self.assertEqual(failure_check_name("a_did_not_move_left"), "bidirectional")
+        self.assertEqual(failure_check_name("camera_did_not_follow"), "camera_follow")
+        self.assertEqual(failure_check_name("boost_distance_too_short"), "boost")
+        self.assertEqual(
+            failure_check_name("left_boost_distance_too_short"), "left_boost"
+        )
+        self.assertEqual(failure_check_name("component_missing:Player:Rigidbody"),
+                         "components:Player")
+        # Static checks are never blocked, so they have no owning check.
+        self.assertIsNone(failure_check_name("scene_not_saved"))
+        self.assertIsNone(failure_check_name("compile_errors:2"))
+
+    def test_failure_count_parses_only_counted_codes(self):
+        self.assertEqual(failure_count("compile_errors:3"), ("compile_errors", 3))
+        self.assertEqual(failure_count("runtime_errors:1"), ("runtime_errors", 1))
+        self.assertIsNone(failure_count("scene_not_saved"))
+        self.assertIsNone(failure_count("component_missing:Player:Rigidbody"))
+
+    def test_first_measurement_after_unblock_is_not_a_regression(self):
+        success, receipt, agent, _ = _run_orchestration([
+            # 1차: 컴파일이 깨져 행동 검사가 전부 차단된 상태
+            StubContract(
+                ["compile_errors:1", "blocked:jump:compile_not_ready",
+                 "component_missing:Player:Rigidbody"],
+                [],
+            ),
+            # repair 후: 처음으로 점프를 측정했고, 실패했다 → 회귀가 아님
+            StubContract(["player_did_not_jump"], ["gameplay", "jump"]),
+            # 두 번째 repair가 실제로 점프를 고친다
+            StubContract([], ["gameplay", "jump"]),
+        ])
+        self.assertTrue(success, "최초 측정 실패로 중단하면 안 된다")
+        self.assertNotIn("verification_regressed", receipt["failures"])
+        self.assertEqual(agent.cycles_run, 2, "repair가 2회 돌아야 한다")
+
+    def test_genuine_regression_still_stops(self):
+        success, receipt, agent, _ = _run_orchestration([
+            # 점프는 이미 측정되어 통과 중이었다
+            StubContract(["scene_not_saved"], ["gameplay", "jump"]),
+            # repair 후 통과하던 점프가 깨졌다 → 진짜 회귀
+            StubContract(["player_did_not_jump"], ["gameplay", "jump"]),
+        ])
+        self.assertFalse(success)
+        self.assertIn("verification_regressed", receipt["failures"])
+        self.assertEqual(agent.cycles_run, 1)
+
+    def test_fewer_compile_errors_is_progress_not_regression(self):
+        success, receipt, _, _ = _run_orchestration([
+            StubContract(["compile_errors:3"], []),
+            StubContract(["compile_errors:1"], []),
+            StubContract([], []),
+        ])
+        self.assertTrue(success)
+        self.assertNotIn("verification_regressed", receipt["failures"])
+
+    def test_rising_compile_errors_is_a_regression(self):
+        success, receipt, _, _ = _run_orchestration([
+            StubContract(["compile_errors:1"], []),
+            StubContract(["compile_errors:5"], []),
+        ])
+        self.assertFalse(success)
+        self.assertIn("verification_regressed", receipt["failures"])
+
+    def test_newly_broken_static_check_is_a_regression(self):
+        """repair가 씬을 저장하지 않고 끝내면 그것은 진짜 회귀다."""
+        success, receipt, _, _ = _run_orchestration([
+            StubContract(["player_did_not_jump"], ["gameplay", "jump"]),
+            StubContract(["scene_not_saved"], ["gameplay", "jump"]),
+        ])
+        self.assertFalse(success)
+        self.assertIn("verification_regressed", receipt["failures"])
+
+
+class RepairRollbackTests(unittest.TestCase):
+    """P1: 자동 수정이 상태를 악화시키면 최선 상태로 되돌린다.
+
+    실측 E2E(20260729_094913)에서 사이클 3이 실패 1건이었는데 사이클 4가
+    2건으로 끝나, 더 나쁜 상태가 프로젝트에 남았다.
+    """
+
+    def test_worse_final_state_is_rolled_back_to_best(self):
+        success, receipt, _, final = _run_orchestration(
+            [
+                # verify 1: 2건
+                StubContract(["player_did_not_move_right", "player_did_not_jump"],
+                             ["gameplay", "movement", "jump"]),
+                # reverify 2: 1건 — 최선 상태
+                StubContract(["player_did_not_move_right"],
+                             ["gameplay", "movement", "jump"]),
+                # reverify 3: 점프가 다시 깨짐 → 회귀
+                StubContract(["player_did_not_move_right", "player_did_not_jump"],
+                             ["gameplay", "movement", "jump"]),
+                # rollback 후 재검증
+                StubContract(["player_did_not_move_right"],
+                             ["gameplay", "movement", "jump"]),
+            ],
+            seed="original",
+            edits=["fixed jump", "broke jump again"],
+        )
+        self.assertFalse(success)
+        self.assertIn("verification_rolled_back", receipt["failures"])
+        # 회귀를 만든 편집이 디스크에서 사라지고 최선 상태가 남는다
+        self.assertEqual(final, "fixed jump")
+        rollback = [a for a in receipt["attempts"] if a["phase"] == "rollback"]
+        self.assertEqual(len(rollback), 1)
+        self.assertEqual(rollback[0]["restored_from"], "reverify 2")
+        self.assertIn("Assets/Scripts/Player.cs", rollback[0]["restored_files"])
+
+    def test_improving_run_is_not_rolled_back(self):
+        success, receipt, _, final = _run_orchestration(
+            [
+                StubContract(["player_did_not_move_right", "player_did_not_jump"],
+                             ["gameplay", "movement", "jump"]),
+                StubContract([], ["gameplay", "movement", "jump"]),
+            ],
+            seed="original",
+            edits=["fixed everything"],
+        )
+        self.assertTrue(success)
+        self.assertNotIn("verification_rolled_back", receipt["failures"])
+        self.assertEqual(final, "fixed everything")
+
+    def test_rollback_can_be_disabled(self):
+        with mock.patch.object(config, "REPAIR_ROLLBACK", False):
+            success, receipt, _, final = _run_orchestration(
+                [
+                    StubContract(["player_did_not_move_right", "player_did_not_jump"],
+                                 ["gameplay", "movement", "jump"]),
+                    StubContract(["player_did_not_move_right"],
+                                 ["gameplay", "movement", "jump"]),
+                    StubContract(["player_did_not_move_right", "player_did_not_jump"],
+                                 ["gameplay", "movement", "jump"]),
+                ],
+                seed="original",
+                edits=["fixed jump", "broke jump again"],
+            )
+        self.assertFalse(success)
+        self.assertNotIn("verification_rolled_back", receipt["failures"])
+        self.assertEqual(final, "broke jump again", "롤백이 꺼지면 악화 상태가 남는다")
+
+    def test_score_prefers_fewer_real_defects(self):
+        self.assertLess(
+            Agent._repair_score(["player_did_not_jump"]),
+            Agent._repair_score(["player_did_not_jump", "player_did_not_move_right"]),
+        )
+
+    def test_score_ignores_orchestration_markers(self):
+        """실측 20260729_102619 회귀: 루프 마커가 점수를 부풀려 올바른 수정을 되돌렸다.
+
+        no_verification_progress는 프로젝트 파일의 결함이 아니라 루프의 판단이므로
+        어느 사이클의 파일을 남길지 고르는 데 영향을 주면 안 된다.
+        """
+        for marker in (
+            "no_verification_progress", "task_time_budget_exhausted",
+            "verification_regressed", "builder_produced_no_mutation_evidence",
+        ):
+            with self.subTest(marker=marker):
+                self.assertEqual(
+                    Agent._repair_score(["player_did_not_jump", marker]),
+                    Agent._repair_score(["player_did_not_jump"]),
+                )
+
+    def test_score_prefers_more_measured_state_on_a_tie(self):
+        self.assertLess(
+            Agent._repair_score(["player_did_not_jump"]),
+            Agent._repair_score(["player_did_not_jump", "blocked:boost:scene_not_ready"]),
+        )
+
+    def test_no_rollback_when_only_a_loop_marker_differs(self):
+        """수정이 진전을 못 냈을 뿐인데 되돌려서 모델의 수정을 버리면 안 된다."""
+        success, receipt, _, final = _run_orchestration(
+            [
+                StubContract(["player_did_not_jump"], ["gameplay", "jump"]),
+                StubContract(["player_did_not_jump"], ["gameplay", "jump"]),
+                StubContract(["player_did_not_jump"], ["gameplay", "jump"]),
+            ],
+            seed="broken",
+            edits=["model attempted fix", "model attempted fix 2"],
+        )
+        self.assertFalse(success)
+        self.assertNotIn("verification_rolled_back", receipt["failures"])
+        self.assertNotEqual(final, "broken", "모델의 수정이 보존돼야 한다")
 
 
 class HostOrchestrationTests(unittest.TestCase):

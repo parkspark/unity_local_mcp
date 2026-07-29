@@ -45,6 +45,10 @@ _LEVEL_WORDS = ("levelloader", "level json", "레벨 json", "데이터 주도", 
 _BOOST_WORDS = ("부스트", "boost", "dash", "대시")
 _BOOST_CONTEXT_WORDS = ("shift",)
 _LANDING_WORDS = ("착지", "land", "landing")
+# Control scheme named in the request. "A/D 좌우 이동" must be verified with A/D,
+# not with the harness's default arrow keys.
+_AD_SCHEME = re.compile(r"\ba\s*[/,·+]\s*d\b|\bd\s*[/,·+]\s*a\b|\bwasd\b", re.I)
+_ARROW_SCHEME = re.compile(r"방향키|화살표|arrow\s*keys?", re.I)
 # Runtime-behaviour language that demands Play Mode proof. If a request uses any
 # of these but no concrete check could be derived, the host refuses to report
 # success instead of silently verifying nothing (verification_spec_empty).
@@ -154,10 +158,24 @@ class VerificationSpec:
     idle_max_delta_x: float = 0.05
     movement_duration: float = 1.0
     movement_min_distance: float = 2.0
+    # Upper sanity bound. A repeated AddForce(..., Impulse) in FixedUpdate sends
+    # the player 100+ units per second, which passed a min-distance-only check
+    # while being obviously broken physics.
+    movement_max_speed: float = 25.0
+    # Which keys the request asked for. Verifying rightArrow against a script
+    # that only reads A/D fails the game for the harness's own assumption.
+    move_right_key: str = "rightArrow"
+    move_left_key: str = "leftArrow"
+    movement_keys_explicit: bool = False
     boost_duration: float = 0.5
     boost_min_ratio: float = 1.4
     jump_min_rise: float = 0.5
     required_components: dict[str, list[str]] = field(default_factory=dict)
+
+    def movement_max_distance(self, duration: float | None = None) -> float:
+        return self.movement_max_speed * (
+            self.movement_duration if duration is None else duration
+        )
 
     @classmethod
     def from_request(cls, request: str, force: bool = False) -> "VerificationSpec":
@@ -207,6 +225,12 @@ class VerificationSpec:
         # Any extracted behaviour condition implies Play Mode: a check that is
         # never run must never count as passed.
         behaviour = movement or jump or camera or boost
+        if _AD_SCHEME.search(request):
+            right_key, left_key, keys_explicit = "d", "a", True
+        elif _ARROW_SCHEME.search(request):
+            right_key, left_key, keys_explicit = "rightArrow", "leftArrow", True
+        else:
+            right_key, left_key, keys_explicit = "rightArrow", "leftArrow", False
         return cls(
             request=preflight.normalized_request,
             enabled=force or _has_word(lower, _BUILD_WORDS),
@@ -237,6 +261,9 @@ class VerificationSpec:
             # Landing is measured as part of the jump arc, so it must not be
             # requested without a jump measurement to attach it to.
             require_jump_landing=jump and _has_word(lower, _LANDING_WORDS),
+            move_right_key=right_key,
+            move_left_key=left_key,
+            movement_keys_explicit=keys_explicit,
             require_left_boost="a+leftshift" in lower.replace(" ", ""),
             required_components=components,
         )
@@ -285,7 +312,10 @@ class VerificationSpec:
         if self.require_level_marker:
             checks.append("런타임 콘솔에 [LevelLoader] Loaded 마커")
         if self.require_movement:
-            checks.append("rightArrow 입력 전후 Player X가 실제로 증가")
+            checks.append(
+                f"{self.move_right_key} 입력 전후 Player X가 실제로 증가하되 "
+                f"{self.movement_max_distance():.0f} 이내"
+            )
         if self.require_idle_stability:
             checks.append(
                 f"무입력 {self.idle_duration}초 Player X 변화가 "
@@ -310,7 +340,8 @@ class VerificationSpec:
         if self.require_bidirectional:
             checks.append(
                 f"D/A를 각각 {self.movement_duration}초 입력해 "
-                f"{self.movement_min_distance} 이상 이동"
+                f"{self.movement_min_distance} 이상 "
+                f"{self.movement_max_distance():.0f} 이하 이동"
             )
         if self.require_jump_landing:
             checks.append("점프가 기준 높이 이상 상승한 뒤 시작 높이로 착지")
@@ -397,6 +428,11 @@ class VerificationContract:
         if camera is not None:
             self.camera_motion_before[name] = camera
         return True
+
+    def rightward_delta(self) -> float | None:
+        """X change of the canonical rightward sample, or None if unmeasured."""
+        before, after = self.motion_before.get("rightArrow"), self.motion_after.get("rightArrow")
+        return None if before is None or after is None else after[0] - before[0]
 
     def end_motion(self, name: str) -> None:
         player = self.latest_positions.get("player")
@@ -584,14 +620,27 @@ class VerificationContract:
         if self.spec.require_level_marker and not self.level_marker_seen:
             failed.append("level_loaded_marker_missing")
         if self.spec.require_movement:
-            before = self.motion_before.get("rightArrow", self.movement_before)
-            after = self.motion_after.get("rightArrow", self.movement_after)
+            # "rightArrow" is the canonical label for the rightward sample; the
+            # bidirectional "d" sample proves the same capability when the
+            # request asked for A/D, so accept either.
+            before = after = None
+            for label in ("rightArrow", "d"):
+                if (
+                    self.motion_before.get(label) is not None
+                    and self.motion_after.get(label) is not None
+                ):
+                    before, after = self.motion_before[label], self.motion_after[label]
+                    break
+            if before is None:
+                before, after = self.movement_before, self.movement_after
             if "movement" in self.blocked_by:
                 pass
             elif before is None or after is None:
                 failed.append("player_movement_not_measured")
             elif after[0] - before[0] <= 1e-3:
                 failed.append("player_did_not_move_right")
+            elif after[0] - before[0] > self.spec.movement_max_distance():
+                failed.append("player_moved_too_far")
         if self.spec.require_idle_stability:
             if "movement" in self.blocked_by:
                 pass
@@ -608,12 +657,20 @@ class VerificationContract:
                 failed.append("d_movement_not_measured")
             elif d[1][0] - d[0][0] < self.spec.movement_min_distance:
                 failed.append("d_did_not_move_right")
+            elif d[1][0] - d[0][0] > self.spec.movement_max_distance(
+                self.motion_duration.get("d")
+            ):
+                failed.append("d_moved_too_far")
             if "movement" in self.blocked_by:
                 pass
             elif None in a:
                 failed.append("a_movement_not_measured")
             elif a[1][0] - a[0][0] > -self.spec.movement_min_distance:
                 failed.append("a_did_not_move_left")
+            elif a[0][0] - a[1][0] > self.spec.movement_max_distance(
+                self.motion_duration.get("a")
+            ):
+                failed.append("a_moved_too_far")
         if self.spec.require_jump:
             if "jump" in self.blocked_by:
                 pass
@@ -802,6 +859,70 @@ class VerificationContract:
         }
 
 
+# Which canonical check each failure code belongs to. Used to tell a genuine
+# regression ("a check that passed now fails") apart from a first measurement
+# ("a check that was blocked before is finally being measured, and it fails").
+# Order matters: longer prefixes must precede the shorter ones they extend.
+_FAILURE_CHECK_PREFIXES = (
+    ("player_did_not_land", "jump_landing"),
+    ("player_did_not_jump", "jump"),
+    ("player_jump_not_measured", "jump"),
+    ("player_did_not_move_right", "movement"),
+    ("player_moved_too_far", "movement"),
+    ("player_movement_not_measured", "movement"),
+    ("d_did_not_move_right", "bidirectional"),
+    ("d_moved_too_far", "bidirectional"),
+    ("d_movement_not_measured", "bidirectional"),
+    ("a_did_not_move_left", "bidirectional"),
+    ("a_moved_too_far", "bidirectional"),
+    ("a_movement_not_measured", "bidirectional"),
+    ("idle_drift_too_large", "idle_stability"),
+    ("idle_stability_not_measured", "idle_stability"),
+    ("camera_did_not_follow", "camera_follow"),
+    ("camera_follow_not_measured", "camera_follow"),
+    ("camera_z_changed", "camera_fixed_z"),
+    ("camera_fixed_z_not_measured", "camera_fixed_z"),
+    ("camera_target_null", "camera_target"),
+    ("rigidbody_constraints_", "player_constraints"),
+    ("left_boost_distance_too_short", "left_boost"),
+    ("left_boost_not_measured", "left_boost"),
+    ("boost_distance_too_short", "boost"),
+    ("boost_not_measured", "boost"),
+    ("level_loaded_marker_missing", "level_marker"),
+    ("play_screenshot_missing", "screenshot"),
+    ("screenshot_file_missing", "screenshot"),
+    ("runtime_errors:", "gameplay"),
+    ("play_mode_not_tested", "gameplay"),
+)
+
+# Failure codes that carry a magnitude. Fewer errors than before is progress,
+# not a new regression, so these are compared numerically instead of by string.
+_COUNTED_FAILURES = ("compile_errors", "runtime_errors")
+
+
+def failure_check_name(failure: str) -> str | None:
+    """Canonical check a failure belongs to, or None for always-static checks.
+
+    None means the check is never blocked (compile, scene save, asset presence),
+    so its appearance is always a real regression.
+    """
+    if failure.startswith("component_missing:"):
+        parts = failure.split(":")
+        return f"components:{parts[1]}" if len(parts) > 2 else None
+    for prefix, name in _FAILURE_CHECK_PREFIXES:
+        if failure.startswith(prefix):
+            return name
+    return None
+
+
+def failure_count(failure: str) -> tuple[str, int] | None:
+    """Split ``compile_errors:3`` into ``("compile_errors", 3)``."""
+    head, _, tail = failure.partition(":")
+    if head in _COUNTED_FAILURES and tail.isdigit():
+        return head, int(tail)
+    return None
+
+
 def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> str:
     allowed = ", ".join(spec.asset_paths) or "(요청에 명시된 기존 산출물만)"
     forbidden = (
@@ -859,6 +980,13 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
                 "끼어 있는지 확인한다. 기존 시작 평지를 이동·확장해 시작점 좌우 "
                 "각 6유닛 이상에 수직 장애물이 없는 연속 평지를 만들고, Player를 "
                 "그 평지 중앙 위의 겹치지 않는 위치에 둔다. 새 씬을 만들지 않는다."
+            )
+        if "moved_too_far" in failure:
+            lint_guidance.append(
+                "- 이동 거리 과다: 매 FixedUpdate에서 AddForce(..., ForceMode.Impulse)를 "
+                "호출하면 속도가 누적돼 폭주한다. 지속 입력은 속도를 직접 설정하거나"
+                "(rb.linearVelocity = new Vector3(input * moveSpeed, rb.linearVelocity.y, 0)) "
+                "ForceMode.Force로 바꾸고, 최대 속도를 제한한다."
             )
         if "player_did_not_jump" in failure:
             lint_guidance.append(
