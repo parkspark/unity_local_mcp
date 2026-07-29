@@ -47,7 +47,7 @@ Writing C# scripts:
 - The C# class name MUST match the file name. Before modifying an existing script, read it first with unity_read_script.
 - ALWAYS place scripts under Assets/Scripts/. Before creating a new script, check it does not already exist elsewhere (unity_list_assets filter "t:Script"). Two files defining the same class break ALL compilation in the project.
 - To remove a stale, duplicate, or conflicting script that breaks compilation, DELETE it with unity_delete_script (do NOT just leave it or try to work around it), then unity_refresh_assets to recompile.
-- This project uses the NEW Input System ONLY. NEVER use the legacy UnityEngine.Input API (Input.GetAxis, Input.GetButtonDown, Input.GetKey...) — it throws InvalidOperationException at runtime. Instead `using UnityEngine.InputSystem;` and read `Keyboard.current` / `Mouse.current` / `Gamepad.current`, e.g. `keyboard.aKey.isPressed`, `keyboard.spaceKey.wasPressedThisFrame`. Always null-check `Keyboard.current` first.
+- This project uses the NEW Input System ONLY. NEVER use the legacy UnityEngine.Input API (Input.GetAxis, Input.GetButtonDown, Input.GetKey...) — it throws InvalidOperationException at runtime. Instead `using UnityEngine.InputSystem;` and read `Keyboard.current` / `Mouse.current` / `Gamepad.current`, e.g. `keyboard.aKey.isPressed`, `keyboard.spaceKey.wasPressedThisFrame`. Always null-check `Keyboard.current` first. For simple keyboard gameplay, read `Keyboard.current` directly and do NOT create or add PlayerInput, InputActionAsset, generated controls, or callback handler components; direct device reads need none of them and unwired action components swallow the task budget without delivering input.
 - Unity 6 renamed APIs — obsolete names trigger a blocking editor dialog. Use `rb.linearVelocity` (NOT `rb.velocity`) and `Object.FindFirstObjectByType<T>()` (NOT `FindObjectOfType<T>()`).
 
 Data-driven levels (games with stages/levels):
@@ -148,6 +148,23 @@ def _merge_leaked_calls(content, calls, had_leak):
             new.append((n, a))
             seen.add(key)
     return cleaned, new + calls, len(new)
+
+
+def _retryable_model_error(error: BaseException) -> bool:
+    """Whether an Ollama response failed before a usable turn was returned."""
+    status = getattr(error, "status_code", None)
+    text = str(error).lower()
+    return status in {-1, 408, 429, 500, 502, 503, 504} or any(
+        marker in text
+        for marker in (
+            "unexpected eof",
+            "connection reset",
+            "connection refused",
+            "temporarily unavailable",
+            "timeout",
+            "timed out",
+        )
+    )
 
 
 def _milestone_prompt(plan: "planner.Plan", idx: int, ledger: "planner.ArtifactLedger",
@@ -295,20 +312,38 @@ class Agent:
             kwargs["tools"] = self.tools.ollama_tools
 
         content, tool_calls = "", []
-        if config.STREAM:
-            stream = await self.client.chat(stream=True, **kwargs)
-            async for chunk in stream:
-                if chunk.message.content:
-                    content += chunk.message.content
-                    self.on_text(chunk.message.content)
-                if chunk.message.tool_calls:
-                    tool_calls.extend(chunk.message.tool_calls)
-        else:
-            resp = await self.client.chat(stream=False, **kwargs)
-            content = resp.message.content or ""
-            tool_calls = list(resp.message.tool_calls or [])
-            if content:
-                self.on_text(content)
+        for attempt in range(config.MODEL_CALL_RETRIES + 1):
+            content, tool_calls = "", []
+            try:
+                if config.STREAM:
+                    stream = await self.client.chat(stream=True, **kwargs)
+                    async for chunk in stream:
+                        if chunk.message.content:
+                            content += chunk.message.content
+                            self.on_text(chunk.message.content)
+                        if chunk.message.tool_calls:
+                            tool_calls.extend(chunk.message.tool_calls)
+                else:
+                    resp = await self.client.chat(stream=False, **kwargs)
+                    content = resp.message.content or ""
+                    tool_calls = list(resp.message.tool_calls or [])
+                    if content:
+                        self.on_text(content)
+                break
+            except ollama.ResponseError as error:
+                if attempt >= config.MODEL_CALL_RETRIES or not _retryable_model_error(error):
+                    raise
+                self._log(
+                    "model_call_retry",
+                    attempt=attempt + 1,
+                    status_code=getattr(error, "status_code", None),
+                    error=str(error),
+                )
+                self.on_warn(
+                    f"Ollama 응답이 중간에 끊겨 모델 호출을 재시도합니다 "
+                    f"({attempt + 1}/{config.MODEL_CALL_RETRIES})."
+                )
+                await asyncio.sleep(0.25)
 
         calls = [(tc.function.name, dict(tc.function.arguments or {})) for tc in tool_calls]
 
@@ -581,6 +616,23 @@ class Agent:
             await self._verification_call(contract, "unity_get_state", {})
             return contract.playing
 
+        async def wait_until_play_active() -> bool:
+            """Allow Unity's play-mode domain reload to finish.
+
+            Unity acknowledges EditorApplication.isPlaying=True before a
+            reload-on-play transition has completed. Large projects can report
+            isPlaying=False for several seconds while assemblies reload, so a
+            single fixed-delay sample creates a retry loop that restarts the
+            domain reload indefinitely.
+            """
+            for _ in range(20):
+                await self._verification_call(
+                    contract, "unity_wait", {"seconds": 0.5}
+                )
+                if await confirm_play_active():
+                    return True
+            return False
+
         async def wait_for_stable_player() -> bool:
             """Wait until spawn gravity/depenetration has settled before input."""
             previous = None
@@ -612,8 +664,7 @@ class Agent:
             await self._verification_call(
                 contract, "unity_play_mode", {"action": "play"}
             )
-            await self._verification_call(contract, "unity_wait", {"seconds": 0.7})
-            return await confirm_play_active() and await wait_for_stable_player()
+            return await wait_until_play_active() and await wait_for_stable_player()
 
         async def measure_motion(
             label: str, key: str, duration: float, boost: bool = False
@@ -706,8 +757,7 @@ class Agent:
                 self._verify_entered_play = (
                     decoded.get("status") == "ok" and contract.playing
                 )
-                await self._verification_call(contract, "unity_wait", {"seconds": 0.7})
-                if await confirm_play_active():
+                if await wait_until_play_active():
                     await self._verification_call(
                         contract, "unity_read_console", {"types": "error,exception"}
                     )
@@ -836,8 +886,13 @@ class Agent:
     })
 
     @classmethod
-    def _repair_score(cls, failures: list[str]) -> tuple[int, int]:
-        """Rank a measured project state: fewer real defects first, then total.
+    def _repair_score(
+        cls,
+        failures: list[str],
+        measured_checks: list[str] | None = None,
+        requested_checks: list[str] | None = None,
+    ) -> tuple[int, int, int]:
+        """Rank a project state: measurement coverage, then real defects.
 
         Used only to decide which cycle's files to keep, never to declare
         success — an empty failure list is still what verification requires.
@@ -850,9 +905,12 @@ class Agent:
                 blocked += 1
             else:
                 state += 1
-        # Tie-break on blocked measurements: a state where more could actually
-        # be measured is the better one to keep.
-        return state, blocked
+        requested = set(requested_checks or ())
+        measured = set(measured_checks or ())
+        unmeasured = len(requested - measured) if requested else 0
+        # A blocked state with no observed defects is not better than a state
+        # where those same checks ran and exposed actionable failures.
+        return unmeasured, state, blocked
 
     def _snapshot_paths(self, spec: VerificationSpec) -> list[str]:
         paths = list(spec.asset_paths)
@@ -874,10 +932,17 @@ class Agent:
             "phase": "verify", "attempt": 1,
             "failures": failures, "evidence": contract.evidence(),
         })
+        requested_checks = spec.requested_checks()
+
+        def repair_score(current_failures: list[str]) -> tuple[int, int, int]:
+            return self._repair_score(
+                current_failures, contract.measured_checks(), requested_checks
+            )
+
         # Remember the best state seen so a later cycle cannot leave the project
         # worse than repair already had it.
         best_snapshot = None
-        best_score = self._repair_score(failures)
+        best_score = repair_score(failures)
         best_label = "verify 1"
         if config.REPAIR_ROLLBACK and allow_fix and failures:
             best_snapshot = snapshot.capture(
@@ -887,6 +952,11 @@ class Agent:
         # Which checks actually produced a measurement. A check that was blocked
         # before cannot "regress" — its first failing measurement is a discovery.
         previous_measured = set(contract.measured_checks())
+        previous_failed_checks = {
+            check
+            for item in failures
+            if (check := failure_check_name(item)) is not None
+        }
         stagnant = 0
 
         for cycle in range(1, config.FIX_MAX_CYCLES + 1):
@@ -996,7 +1066,7 @@ class Agent:
                 "failures": failures, "evidence": contract.evidence(),
             })
             if config.REPAIR_ROLLBACK and failures:
-                score = self._repair_score(failures)
+                score = repair_score(failures)
                 if score < best_score:
                     best_score = score
                     best_label = f"reverify {cycle + 1}"
@@ -1027,6 +1097,7 @@ class Agent:
             critical_new: list[str] = []
             first_measurements: list[str] = []
             improved_counts: list[str] = []
+            changed_failure_modes: list[str] = []
             for item in introduced:
                 if not item.startswith(critical_prefixes):
                     continue
@@ -1040,6 +1111,13 @@ class Agent:
                         improved_counts.append(item)
                         continue
                 check = failure_check_name(item)
+                # The same measured check can move from one failing mode to
+                # another while repair converges (for example movement changes
+                # from too fast to too short). It was not passing before, so
+                # this is not a newly introduced regression.
+                if check is not None and check in previous_failed_checks:
+                    changed_failure_modes.append(item)
+                    continue
                 # Repairing a compile error or a missing Rigidbody unblocks
                 # gameplay checks for the first time. Their failing measurement
                 # is what repair exists to fix, not a reason to stop.
@@ -1055,6 +1133,7 @@ class Agent:
                 persisted=persisted,
                 first_measurements=first_measurements,
                 improved_counts=improved_counts,
+                changed_failure_modes=changed_failure_modes,
                 newly_measured=sorted(current_measured - previous_measured),
             )
             if critical_new:
@@ -1072,6 +1151,11 @@ class Agent:
                 stagnant = 0
             previous_failures = current_failures
             previous_measured = current_measured
+            previous_failed_checks = {
+                check
+                for item in current_failures
+                if (check := failure_check_name(item)) is not None
+            }
 
         # Repair can trade one bug for another. If it ended worse than it got,
         # put the best measured state back so the project is never left
@@ -1080,14 +1164,14 @@ class Agent:
             config.REPAIR_ROLLBACK
             and best_snapshot is not None
             and failures
-            and self._repair_score(failures) > best_score
+            and repair_score(failures) > best_score
         ):
             restored = snapshot.restore(best_snapshot, config.UNITY_PROJECT_DIR)
             self._log(
                 "verification_rollback",
                 to=best_label,
                 best_score=list(best_score),
-                final_score=list(self._repair_score(failures)),
+                final_score=list(repair_score(failures)),
                 restored=restored,
             )
             if restored:
@@ -1095,8 +1179,25 @@ class Agent:
                     f"자동 수정이 상태를 악화시켜 '{best_label}' 시점으로 되돌렸습니다 "
                     f"({len(restored)}개 파일)."
                 )
+                if hasattr(self.tools, "set_tool_mode"):
+                    self.tools.set_tool_mode("full")
+                self._active_tool_mode = "full"
                 refresh = await self.tools.call("unity_refresh_assets", {})
                 self.on_tool("unity_refresh_assets", {}, refresh)
+                # Refresh imports the restored scene file but does not replace
+                # the active in-memory scene. Without reopening it, components
+                # added by the discarded repair remain alive and the rollback
+                # receipt measures a hybrid state that never existed on disk.
+                restored_normalised = {
+                    str(path).replace("\\", "/").lstrip("/") for path in restored
+                }
+                if spec.scene_path and (
+                    spec.scene_path.replace("\\", "/").lstrip("/")
+                    in restored_normalised
+                ):
+                    open_args = {"path": spec.scene_path}
+                    opened = await self.tools.call("unity_open_scene", open_args)
+                    self.on_tool("unity_open_scene", open_args, opened)
                 # Report what the project actually contains now, not the state
                 # that was just discarded.
                 contract = await self._collect_verification(spec)

@@ -21,11 +21,78 @@ from audit_logging import ToolAuditLogger
 
 
 _CS_FLOAT_SUFFIX = re.compile(r"(?<=[\d.])[fF]\b")
+_EDITOR_COMPILE_ERROR = re.compile(
+    r"^((?:Assets|Packages)[\\/].*?\berror\s+(?:CS\d+|[A-Z]+\d*):.*)$",
+    re.MULTILINE,
+)
 
 
 def _lenient_json(text: str):
     """C#풍 float 접미사('0.9f')를 허용해 JSON으로 파싱. 실패 시 예외 전파."""
     return json.loads(_CS_FLOAT_SUFFIX.sub("", text))
+
+
+def _editor_log_compile_errors(project_dir: str | None) -> list[dict]:
+    """Recover the latest failed C# build errors from Unity's durable log.
+
+    The bridge's in-memory console buffer can be reset by a domain reload. A
+    failed compile then prevents Play Mode while unity_read_console incorrectly
+    reports zero errors. Editor.log survives the reload, so use only its latest
+    Tundra build result and never resurrect errors that a later build fixed.
+    """
+    if not project_dir:
+        return []
+    path = os.path.join(project_dir, "Logs", "Editor.log")
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 2_000_000))
+            text = handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+
+    failed_at = text.rfind("*** Tundra build failed")
+    succeeded_at = text.rfind("*** Tundra build success")
+    if failed_at < 0 or failed_at < succeeded_at:
+        return []
+    # Include the compiler output immediately before the failure marker but
+    # exclude older build blocks that may contain already-fixed diagnostics.
+    block_start = max(
+        text.rfind("##### Output", 0, failed_at),
+        text.rfind("*** Tundra build success", 0, failed_at),
+        text.rfind("*** Tundra build failed", 0, failed_at),
+    )
+    block = text[max(0, block_start): failed_at + 1]
+    messages = list(dict.fromkeys(_EDITOR_COMPILE_ERROR.findall(block)))
+    return [
+        {"time": "", "type": "Error", "message": message, "stackTrace": ""}
+        for message in messages
+    ]
+
+
+def _supplement_console_errors(
+    text: str, args: dict, project_dir: str | None
+) -> str:
+    requested = str(args.get("types", "")).lower()
+    if requested and "error" not in requested and "exception" not in requested:
+        return text
+    durable = _editor_log_compile_errors(project_dir)
+    if not durable:
+        return text
+    try:
+        payload = json.loads(text)
+        result = payload["result"]
+        entries = result["entries"]
+        if payload.get("status") != "ok" or not isinstance(entries, list):
+            return text
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return text
+    seen = {str(entry.get("message", "")) for entry in entries if isinstance(entry, dict)}
+    entries.extend(entry for entry in durable if entry["message"] not in seen)
+    result["totalBuffered"] = max(int(result.get("totalBuffered", 0)), len(entries))
+    result["editorLogRecovered"] = len(durable)
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _find_uv() -> str:
@@ -497,6 +564,10 @@ class UnityTools:
                 text = await self._call_once(name, args)
             if dismissed:
                 text += "\n[막고 있던 API 업데이트 동의 모달을 자동 처리했습니다]"
+        if name == "unity_read_console":
+            text = _supplement_console_errors(
+                text, args, self._project_dir or config.UNITY_PROJECT_DIR
+            )
         if name == "unity_refresh_assets":
             text = await self._wait_for_compile(text)
         self.last_raw_result = text

@@ -1,7 +1,7 @@
 # AGENTS.md — unity_local_mcp 작업 규칙
 
 로컬 LLM(Ollama `qwen3-coder:30b`)으로 Unity Editor를 제어하는 에이전트 CLI.
-현재 v1.11.6. 이 저장소에서 작업하는 모든 에이전트는 아래 규칙을 따른다.
+현재 v1.11.7. 이 저장소에서 작업하는 모든 에이전트는 아래 규칙을 따른다.
 
 ---
 
@@ -71,7 +71,7 @@ uv run python main.py --prompt-file <파일>
 ## 5. 표준 명령
 
 ```bash
-# 테스트 (현재 133개 통과)
+# 테스트 (현재 148개 통과, subtest 10개 통과)
 uv run python -m pytest tests/
 
 # 로컬 모델 E2E — 빌더부터 전체
@@ -144,5 +144,6 @@ main.py (CLI) → planner.py (큰 요청 → 마일스톤 분해)
 | v1.11.4 | 이동 검증 공백 — 속도 상한 + 요청 키 사용. **최초의 정당한 verified** | [문서](docs/v1.11.4_movement_verification_gaps.md) |
 | v1.11.5 | repair snapshot/rollback | [문서](docs/v1.11.5_repair_rollback.md) |
 | v1.11.6 | 점프 키 명세, 개발 의존성 정리 | [문서](docs/v1.11.6_jump_key_and_dev_deps.md) |
+| v1.11.7 | 엄격한 새 씬 전체 E2E 첫 통과, 검증 배관 신뢰성 보강 | [문서](docs/v1.11.7_fresh_scene_e2e_reliability.md) |
 
 **현재 진행 상황과 다음 작업**: [docs/HANDOFF_2026-07-29.md](docs/HANDOFF_2026-07-29.md)

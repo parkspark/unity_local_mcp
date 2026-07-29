@@ -2,17 +2,20 @@ import asyncio
 import json
 import os
 import tempfile
+import types
 import unittest
 from unittest import mock
 
 import config
+import ollama
 import planner
-from agent import Agent, _milestone_prompt
+from agent import Agent, _milestone_prompt, _retryable_model_error
 
 
 class FakeTools:
     def __init__(self):
         self.calls = []
+        self.ollama_tools = []
 
     async def call(self, name, args):
         self.calls.append((name, args))
@@ -46,6 +49,49 @@ class ScriptedAgent(Agent):
 
 
 class AgentPolicyTests(unittest.TestCase):
+    def test_retryable_ollama_transport_error_is_retried_once(self):
+        class FlakyClient:
+            def __init__(self):
+                self.calls = 0
+
+            async def chat(self, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise ollama.ResponseError(
+                        "XML syntax error: unexpected EOF", status_code=-1
+                    )
+
+                async def chunks():
+                    yield types.SimpleNamespace(
+                        message=types.SimpleNamespace(
+                            content="recovered", tool_calls=[]
+                        )
+                    )
+
+                return chunks()
+
+        warnings = []
+        agent = Agent(
+            FakeTools(), lambda _text: None, lambda *_: None, warnings.append,
+            enable_logging=False, enable_verification=False,
+        )
+        agent.client = FlakyClient()
+        with mock.patch.object(config, "STREAM", True), \
+             mock.patch.object(config, "MODEL_CALL_RETRIES", 1):
+            content, calls = asyncio.run(agent._chat([]))
+
+        self.assertEqual(content, "recovered")
+        self.assertEqual(calls, [])
+        self.assertEqual(agent.client.calls, 2)
+        self.assertTrue(any("재시도" in warning for warning in warnings))
+
+    def test_non_retryable_ollama_error_is_not_retried(self):
+        self.assertFalse(
+            _retryable_model_error(
+                ollama.ResponseError("bad request", status_code=400)
+            )
+        )
+
     def test_policy_blocks_native_menu_call_before_tool_execution(self):
         tools = FakeTools()
         events = []

@@ -28,6 +28,17 @@ _SCRIPT_PREFIX = "Assets/Scripts/"
 _SCENE_PREFIX = "Assets/Scenes/"
 _LEVELS_PREFIX = "Assets/StreamingAssets/Levels/"
 _LOADER_SCRIPT = "Assets/Scripts/LevelLoader.cs"
+_COMPILE_ERROR_SCRIPT = re.compile(
+    r"(?P<path>Assets[\\/]+Scripts[\\/]+[^()\r\n\"']+?\.cs)"
+    r"\(\s*\d+\s*,\s*\d+\s*\)\s*:\s*error\s+CS\d+",
+    re.I,
+)
+_LEVEL_WORKFLOW = re.compile(
+    r"level\s*loader|levelloader|level\s*json|레벨\s*json|"
+    r"data[- ]driven|데이터\s*주도|레벨|스테이지|"
+    r"Assets/StreamingAssets/Levels/|Assets/Scripts/LevelLoader\.cs",
+    re.I,
+)
 _INPUT_SIM_WORDS = ("플레이 검증", "조작", "입력 테스트", "입력 시뮬레이", "keyboard", "send_key", "키 입력")
 _SCENE_MUTATIONS = {
     "unity_create_gameobject", "unity_create_gameobjects", "unity_modify_gameobject",
@@ -56,6 +67,35 @@ def _successful(result: str) -> bool:
         return isinstance(data, dict) and data.get("status") == "ok"
     except (TypeError, ValueError, AttributeError):
         return False
+
+
+def _compile_error_script_paths(result: str) -> set[str]:
+    """Return exact project scripts named by compiler errors in a console result."""
+    try:
+        data, _end = json.JSONDecoder().raw_decode(str(result).lstrip())
+    except (TypeError, ValueError, AttributeError):
+        return set()
+
+    strings: list[str] = []
+
+    def collect(value: object) -> None:
+        if isinstance(value, str):
+            strings.append(value)
+        elif isinstance(value, dict):
+            for nested in value.values():
+                collect(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                collect(nested)
+
+    collect(data)
+    paths: set[str] = set()
+    for text in strings:
+        for match in _COMPILE_ERROR_SCRIPT.finditer(text):
+            path = re.sub(r"/+", "/", _normalise_path(match.group("path")))
+            if path.startswith(_SCRIPT_PREFIX) and path.lower().endswith(".cs"):
+                paths.add(path)
+    return paths
 
 
 @dataclass
@@ -88,6 +128,8 @@ class TaskContract:
     input_movement_verified: bool = False
     level_load_marker_seen: bool = False
     active_scene_path: str | None = None
+    allow_level_workflow: bool = False
+    compile_error_scripts: set[str] = field(default_factory=set)
 
     @classmethod
     def from_request(cls, request: str, known_scripts: Iterable[str] = ()) -> "TaskContract":
@@ -99,6 +141,7 @@ class TaskContract:
             require_screenshot=any(word in request_lower for word in ("screenshot", "스크린샷", "capture", "캡처")),
             require_play=require_input_sim,
             require_input_sim=require_input_sim,
+            allow_level_workflow=bool(_LEVEL_WORKFLOW.search(request)),
         )
 
     @classmethod
@@ -124,6 +167,13 @@ class TaskContract:
                 "such as unity_create_scene or unity_save_scene instead."
             )
 
+        if name in {"unity_install_level_loader", "unity_write_level", "unity_read_level"}:
+            if not self.allow_level_workflow:
+                return args, (
+                    f"Policy blocked {name}: the user did not request a level/stage, "
+                    "LevelLoader, level JSON, or a data-driven level workflow."
+                )
+
         if name == "unity_list_assets" and "t:script" in str(args.get("filter", "")).lower():
             # Packages can contain thousands of scripts and contaminate a small
             # local model's context.  Project scripts are the useful default.
@@ -136,10 +186,12 @@ class TaskContract:
             if not path.startswith(_SCRIPT_PREFIX) or not path.lower().endswith(".cs"):
                 return args, "Policy blocked script access: scripts must be under Assets/Scripts/ and end in .cs."
             unscoped_existing = path not in self.user_paths | self.session_scripts
-            if name == "unity_delete_script" and unscoped_existing:
+            compiler_proven = path in self.compile_error_scripts
+            if name == "unity_delete_script" and unscoped_existing and not compiler_proven:
                 return args, (
                     f"Policy blocked {name} for {path}: the user did not explicitly scope this existing script. "
-                    "Only scripts created in this session or an Assets/... path named by the user may be read or deleted."
+                    "Only scripts created in this session, an Assets/... path named by the user, "
+                    "or an exact script path reported by the current compiler errors may be deleted."
                 )
             if (
                 name == "unity_read_script"
@@ -223,6 +275,10 @@ class TaskContract:
             self.session_scripts.add(path)
             self.refreshed_after_write = False
             self.compile_checked = False
+        elif name == "unity_delete_script":
+            path = _normalise_path(args.get("path"))
+            self.compile_error_scripts.discard(path)
+            self.session_scripts.discard(path)
         elif name == "unity_install_level_loader":
             # 로더 설치는 스크립트 쓰기와 동일하게 컴파일 검증 사이클을 요구한다.
             self.written_scripts.add(_LOADER_SCRIPT)
@@ -259,6 +315,8 @@ class TaskContract:
             self.refreshed_after_write = True
         elif name == "unity_read_console":
             requested_types = str(args.get("types", "")).lower()
+            if not requested_types or "error" in requested_types or "exception" in requested_types:
+                self.compile_error_scripts.update(_compile_error_script_paths(result))
             if "[LevelLoader] Loaded" in result:
                 self.level_load_marker_seen = True
             if not requested_types or "error" in requested_types or "exception" in requested_types:

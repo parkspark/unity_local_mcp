@@ -14,6 +14,9 @@ TEMPERATURE = float(os.environ.get("UNITY_AGENT_TEMPERATURE", "0.2"))
 KEEP_ALIVE = os.environ.get("UNITY_AGENT_KEEP_ALIVE", "30m")
 # 스트리밍 중 tool_calls가 안 오는 Ollama 버전이면 False로
 STREAM = os.environ.get("UNITY_AGENT_STREAM", "1") != "0"
+# Model calls are side-effect free until returned tool calls are executed, so a
+# transient transport/parser failure can be retried safely.
+MODEL_CALL_RETRIES = int(os.environ.get("UNITY_AGENT_MODEL_RETRIES", "1"))
 
 # 에이전트 루프
 MAX_ITERS = int(os.environ.get("UNITY_AGENT_MAX_ITERS", "15"))

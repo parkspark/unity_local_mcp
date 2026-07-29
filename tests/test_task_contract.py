@@ -69,6 +69,49 @@ class TaskContractTests(unittest.TestCase):
         _, error = contract.prepare_call("unity_delete_script", {"path": "Assets/Scripts/OldSample.cs"})
         self.assertIn("did not explicitly scope", error)
 
+    def test_allows_deleting_only_script_named_by_current_compiler_error(self):
+        contract = TaskContract.from_request("fix the current Unity compilation failure")
+        console = json.dumps({
+            "status": "ok",
+            "result": {
+                "entries": [{
+                    "message": (
+                        r"Assets\Scripts\PlayerInputHandler.cs(38,28): "
+                        "error CS1061: PlayerMovement has no SetMoveInput"
+                    ),
+                }],
+            },
+        })
+        contract.observe("unity_read_console", {"types": "error,exception"}, console)
+
+        _, error = contract.prepare_call(
+            "unity_delete_script",
+            {"path": "Assets/Scripts/PlayerInputHandler.cs"},
+        )
+        self.assertIsNone(error)
+        _, error = contract.prepare_call(
+            "unity_delete_script",
+            {"path": "Assets/Scripts/Unrelated.cs"},
+        )
+        self.assertIn("did not explicitly scope", error)
+
+    def test_non_compiler_console_text_does_not_authorize_script_delete(self):
+        contract = TaskContract.from_request("inspect the current Unity errors")
+        console = json.dumps({
+            "status": "ok",
+            "result": {
+                "entries": [{
+                    "message": "Assets/Scripts/OldSample.cs has a warning but no compiler diagnostic",
+                }],
+            },
+        })
+        contract.observe("unity_read_console", {"types": "error,exception"}, console)
+        _, error = contract.prepare_call(
+            "unity_delete_script",
+            {"path": "Assets/Scripts/OldSample.cs"},
+        )
+        self.assertIn("did not explicitly scope", error)
+
     def test_pathless_save_uses_observed_active_scene_path(self):
         contract = TaskContract.from_request("현재 씬을 수정해줘")
         contract.observe("unity_get_state", {}, json.dumps({
@@ -154,6 +197,30 @@ class TaskContractTests(unittest.TestCase):
 
 
 class LevelAndInputContractTests(unittest.TestCase):
+    def test_unrequested_level_workflow_is_blocked(self):
+        contract = TaskContract.from_request(
+            "새 씬에 Player와 바닥 플랫폼을 만들어 줘"
+        )
+        for name, args in (
+            ("unity_install_level_loader", {}),
+            (
+                "unity_write_level",
+                {"path": "Assets/StreamingAssets/Levels/level1.json"},
+            ),
+            (
+                "unity_read_level",
+                {"path": "Assets/StreamingAssets/Levels/level1.json"},
+            ),
+        ):
+            with self.subTest(name=name):
+                _, error = contract.prepare_call(name, args)
+                self.assertIn("did not request a level/stage", error)
+
+    def test_explicit_level_workflow_allows_loader(self):
+        contract = TaskContract.from_request("레벨 1과 LevelLoader를 만들어 줘")
+        _, error = contract.prepare_call("unity_install_level_loader", {})
+        self.assertIsNone(error)
+
     def test_level_path_policy(self):
         contract = TaskContract.from_request("레벨 만들어 줘")
         _, error = contract.prepare_call("unity_write_level", {"path": "Assets/Scripts/level1.json"})

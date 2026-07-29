@@ -8,7 +8,9 @@ from unittest import mock
 import config
 from agent import Agent
 from audit_logging import ToolAuditLogger
-from mcp_client import UnityTools
+from mcp_client import (
+    UnityTools, _editor_log_compile_errors, _supplement_console_errors,
+)
 
 
 def _records(path):
@@ -17,6 +19,49 @@ def _records(path):
 
 
 class AuditLoggerTests(unittest.TestCase):
+    def test_editor_log_recovers_latest_failed_compile_errors(self):
+        with tempfile.TemporaryDirectory() as project:
+            logs = os.path.join(project, "Logs")
+            os.makedirs(logs)
+            editor_log = os.path.join(logs, "Editor.log")
+            with open(editor_log, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "##### Output\n"
+                    "Assets/Scripts/Old.cs(1,1): error CS0001: old\n"
+                    "*** Tundra build failed\n"
+                    "*** Tundra build success\n"
+                    "##### Output\n"
+                    "Assets/Scripts/PlayerInputHandler.cs(38,28): error CS1061: "
+                    "PlayerMovement has no SetMoveInput\n"
+                    "Assets/Scripts/PlayerInputHandler.cs(38,28): error CS1061: "
+                    "PlayerMovement has no SetMoveInput\n"
+                    "*** Tundra build failed\n"
+                )
+
+            errors = _editor_log_compile_errors(project)
+            self.assertEqual(len(errors), 1)
+            self.assertIn("PlayerInputHandler.cs", errors[0]["message"])
+            supplemented = json.loads(_supplement_console_errors(
+                '{"status":"ok","result":{"entries":[],"totalBuffered":0}}',
+                {"types": "error,exception"},
+                project,
+            ))
+            self.assertEqual(len(supplemented["result"]["entries"]), 1)
+            self.assertEqual(supplemented["result"]["editorLogRecovered"], 1)
+
+    def test_later_success_clears_durable_compile_errors(self):
+        with tempfile.TemporaryDirectory() as project:
+            logs = os.path.join(project, "Logs")
+            os.makedirs(logs)
+            with open(os.path.join(logs, "Editor.log"), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "##### Output\n"
+                    "Assets/Scripts/X.cs(1,1): error CS0001: broken\n"
+                    "*** Tundra build failed\n"
+                    "*** Tundra build success\n"
+                )
+            self.assertEqual(_editor_log_compile_errors(project), [])
+
     def test_direct_unitytools_call_is_audited(self):
         with tempfile.TemporaryDirectory() as tmp:
             tools = UnityTools.__new__(UnityTools)

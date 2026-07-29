@@ -4,7 +4,7 @@
 ![alt text](data/0703_unity_mcp1.gif)
 
 
-로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.6**이다.
+로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.7**이다.
 기존 [unity_mcp](../unity_mcp) MCP 서버와 Unity 브리지를 재사용하고
 (v1.7부터 send_key 등 일부 확장), Claude Code의 자리를 로컬 모델이 대신한다.
 
@@ -156,6 +156,7 @@ MCP 서버의 21개 도구(`unity_send_key` 포함) 외에, 호스트가 직접 
 | `UNITY_AGENT_NUM_CTX` | `32768` | 컨텍스트 길이. VRAM 부족(CPU 분할) 시 16384로 |
 | `UNITY_AGENT_MAX_ITERS` | `15` | 한 턴의 최대 도구 호출 반복 |
 | `UNITY_AGENT_STREAM` | `1` | 스트리밍 중 tool_calls가 안 오면 `0` |
+| `UNITY_AGENT_MODEL_RETRIES` | `1` | EOF·연결 끊김·일시적 서버 오류가 난 모델 호출의 재시도 횟수 |
 | `UNITY_MCP_DIR` | `..\unity_mcp` 절대경로 | MCP 서버 위치 |
 | `UNITY_PROJECT_DIR` | Unity 프로젝트 절대경로 | 스크립트 쓰기·브리지 포트 파일 위치. `--project`가 있으면 실행 인자가 우선 |
 | `UNITY_AGENT_AUTO_OPEN` | `1` | 스크린샷 자동 열기 |
@@ -387,3 +388,12 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           해당 키로 검증합니다. 또한 `pytest`/`pytest-cov`를 dev 의존성 그룹으로 선언해
           `uv run python -m pytest tests/`가 별도 `--with` 없이 동작합니다.
           상세: [docs/v1.11.6_jump_key_and_dev_deps.md](docs/v1.11.6_jump_key_and_dev_deps.md)
+
+- ver 1.11.7 - **엄격한 새 씬 전체 E2E 첫 통과 + 검증 배관 신뢰성 보강.** 실행 전에
+          씬과 `.meta`가 모두 없음을 확인한 경로를 `--repair-existing` 없이 로컬 모델에
+          맡겨, 단일 실행 안에서 제작·repair·독립 검증까지 처음으로 통과했습니다.
+          미측정 상태를 우대하던 rollback 점수, 도메인 리로드 중 Play Mode 오판,
+          리로드로 사라진 컴파일 오류, rollback 뒤 메모리 씬 잔존, 미요청 LevelLoader,
+          짧은 점프 입력 누락, 일시적 Ollama EOF를 고쳤습니다. 최종 영수증은 요청한
+          5개 검사를 모두 측정했고 `skipped_checks=[]`를 기록했습니다.
+          상세: [docs/v1.11.7_fresh_scene_e2e_reliability.md](docs/v1.11.7_fresh_scene_e2e_reliability.md)

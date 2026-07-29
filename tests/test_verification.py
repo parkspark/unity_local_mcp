@@ -13,7 +13,7 @@ from preflight import inspect_request
 from policy_lint import apply_safe_repairs, lint_scripts
 from verification import (
     VerificationContract, VerificationSpec, failure_check_name, failure_count,
-    write_receipt,
+    fix_prompt, write_receipt,
 )
 from version import __version__
 
@@ -283,6 +283,34 @@ class PolicyLintTests(unittest.TestCase):
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_play_transition_false_before_first_active_is_not_an_unexpected_end(self):
+        spec = VerificationSpec.from_request("A/D 이동과 Space 점프를 구현해줘")
+        contract = VerificationContract(spec, "")
+        state = {
+            "activeScene": {
+                "path": "Assets/Scenes/Game.unity",
+                "isDirty": False,
+            }
+        }
+
+        contract.observe(
+            "unity_play_mode", {"action": "play"}, result({"isPlaying": True})
+        )
+        contract.observe(
+            "unity_get_state", {}, result({"isPlaying": False, **state})
+        )
+        self.assertFalse(contract.play_ended_unexpectedly)
+        self.assertFalse(contract.final_stopped)
+
+        contract.observe(
+            "unity_get_state", {}, result({"isPlaying": True, **state})
+        )
+        contract.observe(
+            "unity_get_state", {}, result({"isPlaying": False, **state})
+        )
+        self.assertTrue(contract.play_ended_unexpectedly)
+        self.assertTrue(contract.final_stopped)
+
     def test_measured_movement_jump_camera_and_receipt_pass(self):
         with tempfile.TemporaryDirectory() as project, tempfile.TemporaryDirectory() as receipts:
             screenshot = os.path.join(project, "shot.png")
@@ -356,6 +384,7 @@ class HostTools:
         self.ollama_tools = []
         self.modes = []
         self.calls = []
+        self.call_modes = []
         self.dirty = dirty
 
     def set_tool_mode(self, mode):
@@ -364,6 +393,7 @@ class HostTools:
 
     async def call(self, name, args):
         self.calls.append((name, args))
+        self.call_modes.append((self.tool_mode, name, args))
         if name == "unity_get_state":
             return result({
                 "isPlaying": False,
@@ -538,7 +568,7 @@ class StubContract:
 class ScriptedVerificationAgent(Agent):
     """Replays a fixed sequence of verification outcomes across repair cycles."""
 
-    def __init__(self, contracts, edits=None):
+    def __init__(self, contracts, edits=None, scene_edits=None, scene_path=None):
         super().__init__(
             HostTools(), lambda *_: None, lambda *_: None, lambda *_: None,
             enable_logging=False, enable_verification=True,
@@ -546,10 +576,13 @@ class ScriptedVerificationAgent(Agent):
         self.contracts = iter(contracts)
         # Per-cycle file writes so a rollback has something real to undo.
         self.edits = iter(edits or [])
+        self.scene_edits = iter(scene_edits or [])
+        self.scene_path = scene_path
         self._turn_mutation_count = 1  # repair loop demands mutation evidence
         self.cycles_run = 0
 
     async def _collect_verification(self, spec):
+        self.tools.set_tool_mode("verify")
         return next(self.contracts)
 
     async def _react_loop(self, messages, contract, max_iters, ledger=None):
@@ -560,12 +593,25 @@ class ScriptedVerificationAgent(Agent):
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(edit)
+        scene_edit = next(self.scene_edits, None)
+        if scene_edit and self.scene_path:
+            path = os.path.join(
+                config.UNITY_PROJECT_DIR, *self.scene_path.split("/")
+            )
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(scene_edit)
         return True, "", 1
 
 
-def _run_orchestration(contracts, request="점프를 고쳐줘", edits=None, seed=None):
+def _run_orchestration(
+    contracts, request="점프를 고쳐줘", edits=None, seed=None, scene_seed=None,
+    scene_edits=None,
+):
     spec = VerificationSpec.from_request(request)
-    agent = ScriptedVerificationAgent(contracts, edits)
+    agent = ScriptedVerificationAgent(
+        contracts, edits, scene_edits, scene_path=spec.scene_path
+    )
     with tempfile.TemporaryDirectory() as project, \
          tempfile.TemporaryDirectory() as receipts, \
          mock.patch.object(config, "UNITY_PROJECT_DIR", project), \
@@ -575,6 +621,11 @@ def _run_orchestration(contracts, request="점프를 고쳐줘", edits=None, see
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(seed)
+        if scene_seed is not None and spec.scene_path:
+            scene_path = os.path.join(project, *spec.scene_path.split("/"))
+            os.makedirs(os.path.dirname(scene_path), exist_ok=True)
+            with open(scene_path, "w", encoding="utf-8") as handle:
+                handle.write(scene_seed)
         success = asyncio.run(
             agent._run_verification_orchestration(spec, None, time.monotonic(), True)
         )
@@ -672,6 +723,26 @@ class RegressionDetectionTests(unittest.TestCase):
         self.assertFalse(success)
         self.assertIn("verification_regressed", receipt["failures"])
 
+    def test_changed_failure_mode_within_same_check_can_continue(self):
+        """실측 20260729_115957: 폭주 이동을 줄인 뒤 과소 이동이 되자 회귀로 멈췄다."""
+        success, receipt, agent, _ = _run_orchestration(
+            [
+                StubContract(
+                    ["d_moved_too_far", "a_moved_too_far"],
+                    ["gameplay", "movement", "bidirectional"],
+                ),
+                StubContract(
+                    ["d_did_not_move_right", "a_did_not_move_left"],
+                    ["gameplay", "movement", "bidirectional"],
+                ),
+                StubContract([], ["gameplay", "movement", "bidirectional"]),
+            ],
+            request="A/D 좌우 이동을 구현해줘",
+        )
+        self.assertTrue(success)
+        self.assertNotIn("verification_regressed", receipt["failures"])
+        self.assertEqual(agent.cycles_run, 2)
+
 
 class RepairRollbackTests(unittest.TestCase):
     """P1: 자동 수정이 상태를 악화시키면 최선 상태로 되돌린다.
@@ -768,6 +839,53 @@ class RepairRollbackTests(unittest.TestCase):
             Agent._repair_score(["player_did_not_jump", "blocked:boost:scene_not_ready"]),
         )
 
+    def test_score_prefers_measured_failures_over_blocked_unknown_state(self):
+        requested = ["gameplay", "movement", "jump"]
+        self.assertLess(
+            Agent._repair_score(
+                ["player_did_not_move_right", "player_did_not_jump"],
+                requested,
+                requested,
+            ),
+            Agent._repair_score(
+                [
+                    "blocked:gameplay:scene_not_ready",
+                    "blocked:movement:scene_not_ready",
+                    "blocked:jump:scene_not_ready",
+                ],
+                [],
+                requested,
+            ),
+        )
+
+    def test_blocked_initial_state_is_not_restored_over_measured_repairs(self):
+        success, receipt, agent, final = _run_orchestration(
+            [
+                StubContract(
+                    [
+                        "blocked:gameplay:scene_not_ready",
+                        "blocked:jump:scene_not_ready",
+                        "scene_not_saved",
+                    ],
+                    [],
+                ),
+                StubContract(["player_did_not_jump"], ["gameplay", "jump"]),
+                StubContract(["player_did_not_jump"], ["gameplay", "jump"]),
+                StubContract(["player_did_not_jump"], ["gameplay", "jump"]),
+            ],
+            seed="blocked original",
+            edits=["measured repair 1", "measured repair 2", "measured repair 3"],
+        )
+        self.assertFalse(success)
+        self.assertNotIn("verification_rolled_back", receipt["failures"])
+        self.assertEqual(final, "measured repair 3")
+        self.assertFalse(
+            any(
+                mode == "verify" and name == "unity_refresh_assets"
+                for mode, name, _ in agent.tools.call_modes
+            )
+        )
+
     def test_no_rollback_when_only_a_loop_marker_differs(self):
         """수정이 진전을 못 냈을 뿐인데 되돌려서 모델의 수정을 버리면 안 된다."""
         success, receipt, _, final = _run_orchestration(
@@ -782,6 +900,77 @@ class RepairRollbackTests(unittest.TestCase):
         self.assertFalse(success)
         self.assertNotIn("verification_rolled_back", receipt["failures"])
         self.assertNotEqual(final, "broken", "모델의 수정이 보존돼야 한다")
+
+    def test_rollback_refresh_temporarily_restores_full_tool_mode(self):
+        _, receipt, agent, _ = _run_orchestration(
+            [
+                StubContract(
+                    ["player_did_not_move_right", "player_did_not_jump"],
+                    ["gameplay", "movement", "jump"],
+                ),
+                StubContract(
+                    ["player_did_not_move_right"],
+                    ["gameplay", "movement", "jump"],
+                ),
+                StubContract(
+                    ["player_did_not_move_right", "player_did_not_jump"],
+                    ["gameplay", "movement", "jump"],
+                ),
+                StubContract(
+                    ["player_did_not_move_right"],
+                    ["gameplay", "movement", "jump"],
+                ),
+            ],
+            request="Assets/Scenes/Test.unity 씬에서 이동과 점프를 고쳐줘",
+            seed="original",
+            edits=["fixed jump", "broke jump again"],
+            scene_seed="original scene",
+            scene_edits=["fixed scene", "broken scene"],
+        )
+        self.assertIn("verification_rolled_back", receipt["failures"])
+        refresh_modes = [
+            mode for mode, name, _ in agent.tools.call_modes
+            if name == "unity_refresh_assets"
+        ]
+        self.assertEqual(refresh_modes, ["full"])
+        open_calls = [
+            (mode, args) for mode, name, args in agent.tools.call_modes
+            if name == "unity_open_scene"
+        ]
+        self.assertEqual(
+            open_calls,
+            [("full", {"path": "Assets/Scenes/Test.unity"})],
+        )
+
+
+class RepairPromptGuidanceTests(unittest.TestCase):
+    def test_movement_failure_explains_unwired_input_callbacks(self):
+        spec = VerificationSpec.from_request(
+            "A/D 좌우 이동과 Space 점프를 구현해줘"
+        )
+        prompt = fix_prompt(
+            spec,
+            [
+                "player_did_not_move_right",
+                "d_did_not_move_right",
+                "a_did_not_move_left",
+            ],
+            {},
+        )
+        self.assertIn("OnMove(InputValue)가 호출되지 않는다", prompt)
+        self.assertIn("Keyboard.current", prompt)
+        self.assertIn("aKey/dKey.isPressed", prompt)
+        self.assertIn("PlayerInput, InputActionAsset", prompt)
+        self.assertIn("해당 컴포넌트가 이미 있으면 제거", prompt)
+        self.assertIn("legacy UnityEngine.Input API는 사용하지 않는다", prompt)
+
+    def test_jump_failure_requires_update_to_fixedupdate_latch(self):
+        spec = VerificationSpec.from_request("Space 점프를 구현해줘")
+        prompt = fix_prompt(spec, ["player_did_not_jump"], {})
+        self.assertIn("wasPressedThisFrame은 Update에서 읽어", prompt)
+        self.assertIn("jumpRequested=true", prompt)
+        self.assertIn("FixedUpdate에서 isGrounded일 때", prompt)
+        self.assertIn("짧은 입력을 놓칠 수 있다", prompt)
 
 
 class HostOrchestrationTests(unittest.TestCase):

@@ -466,7 +466,10 @@ class VerificationContract:
             self.scene_clean = bool(self.scene_path_seen) and not bool(scene.get("isDirty", True))
             if self.played and self.playing:
                 self.play_active_confirmed = True
-            if self.played and not self.playing:
+            # isPlaying can temporarily read false while Unity reloads the
+            # domain after accepting a play request. It is an unexpected end
+            # only after this contract has observed Play Mode active once.
+            if self.play_active_confirmed and not self.playing:
                 self.final_stopped = True
                 if not self.final_stop_requested:
                     self.play_ended_unexpectedly = True
@@ -475,6 +478,7 @@ class VerificationContract:
             if action == "play":
                 self.played = True
                 self.playing = True
+                self.play_active_confirmed = False
                 self.waited = False
                 self.runtime_checked = False
                 self.final_stopped = False
@@ -993,6 +997,22 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
                 "각 6유닛 이상에 수직 장애물이 없는 연속 평지를 만들고, Player를 "
                 "그 평지 중앙 위의 겹치지 않는 위치에 둔다. 새 씬을 만들지 않는다."
             )
+        if failure in {
+            "player_did_not_move_right",
+            "d_did_not_move_right",
+            "a_did_not_move_left",
+        }:
+            lint_guidance.append(
+                "- 이동 입력 미전달: PlayerInput과 InputAction 바인딩이 실제로 설정되지 "
+                "않은 씬에서는 OnMove(InputValue)가 호출되지 않는다. 이 경우 "
+                "Keyboard.current를 null 검사한 뒤 aKey/dKey.isPressed를 매 프레임 "
+                "직접 읽어 -1/0/1 축을 만들고, FixedUpdate에서 "
+                "rb.linearVelocity.x = axis * moveSpeed로 대입하되 Y 속도는 보존한다. "
+                "직접 Keyboard.current를 읽는 구현에는 PlayerInput, InputActionAsset, "
+                "생성 controls, 별도 입력 handler가 전혀 필요하지 않으므로 추가하지 말고, "
+                "연결되지 않은 해당 컴포넌트가 이미 있으면 제거한다. "
+                "legacy UnityEngine.Input API는 사용하지 않는다."
+            )
         if "moved_too_far" in failure:
             lint_guidance.append(
                 "- 이동 거리 과다: 매 FixedUpdate에서 AddForce(..., ForceMode.Impulse)를 "
@@ -1004,7 +1024,10 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
             lint_guidance.append(
                 "- 점프 실패: CheckGrounded Raycast가 안정 착지 위치에서 확실히 "
                 "Collider를 맞히도록 거리/시작점을 Collider.bounds 기반으로 고친다. "
-                "Space wasPressedThisFrame과 isGrounded 조건은 유지한다."
+                "Keyboard.current.spaceKey.wasPressedThisFrame은 Update에서 읽어 "
+                "jumpRequested=true로 저장하고, FixedUpdate에서 isGrounded일 때 "
+                "점프를 적용한 뒤 false로 소비한다. wasPressedThisFrame을 "
+                "FixedUpdate에서만 읽으면 짧은 입력을 놓칠 수 있다."
             )
     lint_section = "\n".join(dict.fromkeys(lint_guidance)) or "- 해당 없음"
     return f"""[독립 검증 실패 자동 수정 단계]
