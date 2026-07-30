@@ -4,6 +4,7 @@ from unittest import mock
 
 import config
 from task_contract import TaskContract
+from verification import VerificationSpec
 from agent import _screenshot_path
 
 
@@ -135,11 +136,52 @@ class TaskContractTests(unittest.TestCase):
 
     def test_ad_scheme_matches_the_verification_layer(self):
         """The enforced script keys must not disagree with the measured keys."""
-        for request in ("A, D로 이동", "A/D 이동", "D+A 이동", "WASD 이동"):
+        for request in (
+            "A, D로 이동", "A/D 이동", "D+A 이동", "WASD 이동",
+            # 사용자가 실제로 쓴 표기들. 조사가 달라 두 번 갈라졌다.
+            "ad키로 좌우로 이동", "ad로 좌우로 움직이고",
+        ):
             with self.subTest(request=request):
                 keys = TaskContract.from_request(request).direct_keyboard_keys
                 self.assertIn("aKey", keys)
                 self.assertIn("dKey", keys)
+
+    def test_gate_and_host_never_disagree_on_the_control_scheme(self):
+        """게이트가 강제하는 키와 호스트가 측정하는 키가 갈라지면 안 된다.
+
+        같은 뜻의 정규식을 두 모듈에 따로 두었다가 `ad키`와 `ad로`에서 두 번
+        갈라졌다. 갈라지면 A/D로 올바르게 구현한 게임을 하네스가 방향키로 재고
+        떨어뜨린다 — v1.11.4가 고친 것과 같은 계열의 결함이다.
+        """
+        for request in (
+            "A/D 이동을 구현해줘",
+            "ad키로 좌우로 이동하게 해줘",
+            "ad로 좌우로 움직이게 만들어줘",
+            "AD 키로 좌우 이동을 구현해줘",
+            "방향키로 좌우 이동을 구현해줘",
+            "WASD로 이동하게 해줘",
+        ):
+            with self.subTest(request=request):
+                spec = VerificationSpec.from_request(request)
+                gate = TaskContract.from_request(request).direct_keyboard_keys
+                measured = {f"{spec.move_right_key}Key", f"{spec.move_left_key}Key"}
+                self.assertTrue(
+                    measured <= gate,
+                    f"호스트는 {sorted(measured)}로 측정하는데 게이트는 {sorted(gate)}만 강제한다",
+                )
+
+    def test_scene_wording_without_a_space_is_still_a_fresh_scene(self):
+        """"새씬을 열어서"가 빠져 새 씬 정책이 통째로 꺼졌다."""
+        for request in ("새씬을 열어서 플랫포머를 만들어줘", "새 씬을 열어서 만들어줘"):
+            with self.subTest(request=request):
+                self.assertTrue(TaskContract.from_request(request).fresh_scene_requested)
+
+    def test_tracking_wording_marks_the_request_as_needing_a_camera(self):
+        """v1.11.12의 빈 템플릿 차단은 '추적'을 몰라 꺼져 있었다."""
+        contract = TaskContract.from_request(
+            "새씬을 열어서 카메라가 플레이어를 추적하게 만들어줘"
+        )
+        self.assertTrue(contract.camera_requested)
 
     def test_explicit_simple_keys_require_direct_keyboard_script(self):
         contract = TaskContract.from_request(
@@ -525,6 +567,46 @@ class TaskContractTests(unittest.TestCase):
         self.assertIsNotNone(error)
         self.assertIn('no CompareTag("Ground")', error)
         self.assertIn("contact.normal", error)
+
+    def test_camera_script_is_not_judged_as_a_player_input_script(self):
+        """`CameraController.cs`가 파일명의 'controller' 때문에 13회 차단됐다.
+
+        카메라 추종 스크립트에는 Keyboard.current도 점프 래치도 접지 검사도 있을
+        이유가 없다. 게이트가 그 아홉 항목을 요구해 빌더 예산의 절반이 사라졌다.
+        """
+        contract = TaskContract.from_request(
+            "A/D 이동과 Space 점프를 구현하고 카메라가 Player를 추적하게 해줘"
+        )
+        _, error = contract.prepare_call(
+            "unity_write_script",
+            {
+                "path": "Assets/Scripts/CameraController.cs",
+                "content": (
+                    "using UnityEngine;\n"
+                    "public class CameraController : MonoBehaviour {\n"
+                    "  public Transform target;\n"
+                    "  public Vector3 offset = new Vector3(0, 2, -10);\n"
+                    "  void LateUpdate() { if (target != null) "
+                    "transform.position = target.position + offset; }\n"
+                    "}"
+                ),
+            },
+        )
+        self.assertIsNone(error)
+
+    def test_player_script_is_still_judged(self):
+        """카메라 예외가 플레이어 스크립트까지 열어주면 안 된다."""
+        contract = TaskContract.from_request(
+            "A/D 이동과 Space 점프를 구현하고 카메라가 Player를 추적하게 해줘"
+        )
+        _, error = contract.prepare_call(
+            "unity_write_script",
+            {
+                "path": "Assets/Scripts/PlayerController.cs",
+                "content": "public class PlayerController : MonoBehaviour {}",
+            },
+        )
+        self.assertIsNotNone(error)
 
     def test_camera_request_rejects_an_empty_scene_template(self):
         """An empty scene has no camera, so a camera check can never pass."""

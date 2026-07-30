@@ -1,0 +1,1 @@
+Assets/Scenes/CoinScoreRepro1.unity 경로에 새 빈 씬을 생성하고, Player(캡슐)와 바닥 플랫폼(큐브)을 만들어줘. New Input System으로 A/D 좌우 이동을 구현하고, Player가 코인에 닿으면 점수가 1 올라가게 해줘. 이동과 점수 획득이 실제로 되는지 검증까지 끝내줘.

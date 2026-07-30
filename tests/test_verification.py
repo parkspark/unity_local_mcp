@@ -233,6 +233,68 @@ class BehaviourSpecExtractionTests(unittest.TestCase):
             contract.compile_checked = True
             self.assertEqual(contract.failures(), [])
 
+    def test_unmapped_requirement_is_named_when_movement_alone_is_measured(self):
+        """부분 집합을 전체로 판정하는 것을 영수증에서 보이게 한다.
+
+        v1.11.13은 검사가 *하나도* 없을 때만 막았다. 이동은 측정하면서 요청의
+        핵심(점수·소멸·클리어)은 아무 검사도 없는 경우가 더 위험하다 —
+        measured_checks가 비어 있지 않아 기존 가드에 걸리지 않는다.
+        """
+        spec = VerificationSpec.from_request(
+            "Assets/Scenes/A.unity에 새 씬을 만들고 Player가 A/D로 이동하고 "
+            "코인에 닿으면 점수가 1 올라가게 구현해줘. 실제로 되는지 검증까지 끝내줘."
+        )
+        self.assertIn("movement", spec.requested_checks())
+        unmapped = spec.unmapped_requirements()
+        self.assertTrue(unmapped)
+        self.assertIn("점수", " ".join(unmapped))
+        # 기록 단계다. 판정은 바꾸지 않는다.
+        with tempfile.TemporaryDirectory() as project:
+            contract = VerificationContract(spec=spec, project_dir=project)
+            self.assertNotIn(
+                "unmapped_requirement",
+                " ".join(contract.failures()),
+                "recording stage must not change the verdict",
+            )
+
+    def test_measured_shapes_report_no_unmapped_requirement(self):
+        """통과가 확인된 형태에서 오탐이 나오면 안 된다."""
+        for request in (
+            "Assets/Scenes/A.unity 경로에 새 빈 씬을 생성하고, Player(캡슐)를 만들어 "
+            "New Input System으로 A/D 좌우 이동과 Space 점프가 되도록 구현해줘. "
+            "점프는 한 번 누를 때 한 번만 떠올라 다시 바닥에 착지해야 한다. "
+            "이동과 점프가 실제로 되는지 검증까지 끝내줘.",
+            "Assets/Scenes/B.unity 경로에 새 빈 씬을 생성하고, Player와 바닥을 만들어 "
+            "A/D 좌우 이동을 구현하고, Main Camera가 Player를 따라오게 만들어줘. "
+            "이동과 카메라 추종이 실제로 되는지 검증까지 끝내줘.",
+            "Assets/Scenes/C.unity 경로에 새 빈 씬을 생성하고, Player와 바닥을 만들어 "
+            "A/D 이동을 구현하고, D와 LeftShift를 함께 누르면 부스트로 더 빨라지게 "
+            "해줘. 이동과 부스트가 실제로 되는지 검증까지 끝내줘.",
+        ):
+            with self.subTest(request=request[:30]):
+                spec = VerificationSpec.from_request(request)
+                self.assertEqual(spec.unmapped_requirements(), [])
+
+    def test_asset_path_words_do_not_trigger_a_requirement(self):
+        """씬 이름의 'Grid' 같은 조각이 요구사항으로 잡히면 안 된다."""
+        spec = VerificationSpec.from_request(
+            "Assets/Scenes/GridProceduralRepro1.unity 경로에 새 빈 씬을 생성하고 "
+            "Player가 A/D로 이동하게 구현해줘. 이동이 실제로 되는지 검증해줘."
+        )
+        self.assertEqual(spec.unmapped_requirements(), [])
+
+    def test_receipt_records_unmapped_requirements(self):
+        spec = VerificationSpec.from_request(
+            "Assets/Scenes/A.unity에 새 씬을 만들고 Player가 A/D로 이동하고 "
+            "총알이 적에 맞으면 적이 사라지게 구현해줘. 검증까지 끝내줘."
+        )
+        with tempfile.TemporaryDirectory() as receipts:
+            path = write_receipt(receipts, spec, "verified", {}, [], [], 1.0)
+            with open(path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+        self.assertTrue(payload["unmapped_requirements"])
+        self.assertIn("사라지", " ".join(payload["unmapped_requirements"]))
+
     def test_check_report_separates_measured_from_skipped(self):
         spec = VerificationSpec.from_request(self.JUMP_FIX_REQUEST)
         with tempfile.TemporaryDirectory() as project:
@@ -1185,6 +1247,209 @@ class RepairPromptGuidanceTests(unittest.TestCase):
         prompt = fix_prompt(spec, ["player_jumped_too_high"], {})
         self.assertIn("impulse", prompt)
         self.assertIn("pressed && !jumpHeld", prompt)
+
+
+class UserWordingExtractionTests(unittest.TestCase):
+    """사용자가 실제로 입력한 문장 하나가 드러낸 추출 공백 넷.
+
+    "3층짜리 플랫폼을 만들어. ad키로 좌우로 움직이고, space가 점프, 좌쉬프트키를
+    누르면 순간적으로 방향키 방향으로 가속하게해. 카메라를 추가해서 플레이어를
+    추적하게해."
+
+    이 요청은 검사 4개만 뽑혔고 이동을 **방향키로** 측정하려 했다. A/D로 올바르게
+    구현한 게임을 하네스가 떨어뜨리는 상태였다.
+    """
+
+    REQUEST = (
+        "3층짜리 플랫폼을 만들어. ad키로 좌우로 움직이고, space가 점프, "
+        "좌쉬프트키를 누르면 순간적으로 방향키 방향으로 가속하게해. "
+        "카메라를 추가해서 플레이어를 추적하게해. "
+    )
+
+    def setUp(self):
+        self.spec = VerificationSpec.from_request(self.REQUEST)
+
+    def test_ad_without_a_separator_is_the_ad_scheme(self):
+        """'ad키'에는 구분자가 없어 A/D 정규식이 놓쳤고, '방향키 방향으로 가속'의
+        '방향키'가 대신 잡혀 화살표 스킴으로 측정하려 했다."""
+        self.assertEqual((self.spec.move_right_key, self.spec.move_left_key), ("d", "a"))
+        self.assertTrue(self.spec.movement_keys_explicit)
+
+    def test_bidirectional_survives_the_ad_spelling(self):
+        """'ad키'에는 \\ba\\b도 \\bd\\b도 없어 양방향 검사가 빠졌다."""
+        self.assertTrue(self.spec.require_bidirectional)
+
+    def test_korean_shift_spelling_enables_boost(self):
+        """부스트 문맥어가 라틴 'shift'뿐이라 '좌쉬프트키'를 놓쳤다."""
+        self.assertTrue(self.spec.require_boost)
+
+    def test_tracking_wording_enables_camera_follow(self):
+        """추종 어휘에 '추적'이 없어 카메라 검사가 하나도 만들어지지 않았다."""
+        self.assertTrue(self.spec.require_camera_follow)
+        self.assertIn("Main Camera", self.spec.required_components)
+
+    def test_floor_count_is_reported_as_unmapped(self):
+        """층수를 세는 검사는 어휘에 없다. 없다는 사실이 보여야 한다."""
+        unmapped = self.spec.unmapped_requirements()
+        self.assertTrue(unmapped)
+        self.assertIn("3층", " ".join(unmapped))
+
+    def test_every_other_requirement_is_covered(self):
+        for name in ("movement", "bidirectional", "jump", "boost", "camera_follow"):
+            with self.subTest(check=name):
+                self.assertIn(name, self.spec.requested_checks())
+
+
+class CameraViewpointTests(unittest.TestCase):
+    """플레이어에 붙은 시점 카메라는 추종 검사를 완벽하게 통과한다.
+
+    사용자가 직접 돌려보고 "카메라가 관찰이 아니라 시점으로 되어 있다"고 보고했다.
+    변위 비교만으로는 구분할 수 없다 — 붙어 있으면 델타가 정확히 같다.
+    """
+
+    def _contract(self, camera_start, camera_end, player_start, player_end):
+        spec = VerificationSpec.from_request(
+            "A/D 이동과 카메라가 Player를 추적하게 구현해줘"
+        )
+        contract = VerificationContract(spec=spec, project_dir="")
+        contract.motion_before["d"] = player_start
+        contract.motion_after["d"] = player_end
+        contract.camera_motion_before["d"] = camera_start
+        contract.camera_motion_after["d"] = camera_end
+        return contract
+
+    def test_camera_sitting_on_the_player_is_not_observing_it(self):
+        contract = self._contract(
+            (0.0, 1.0, 0.0), (5.0, 1.0, 0.0), (0.0, 1.0, 0.0), (5.0, 1.0, 0.0)
+        )
+        self.assertIn("camera_is_player_viewpoint", contract.failures())
+
+    def test_camera_behind_and_above_the_player_passes(self):
+        contract = self._contract(
+            (0.0, 3.0, -10.0), (5.0, 3.0, -10.0), (0.0, 1.0, 0.0), (5.0, 1.0, 0.0)
+        )
+        failures = contract.failures()
+        self.assertNotIn("camera_is_player_viewpoint", failures)
+        self.assertNotIn("camera_did_not_follow", failures)
+
+    def test_gap_is_recorded_in_evidence_so_a_receipt_can_be_reread(self):
+        contract = self._contract(
+            (0.0, 3.0, -10.0), (5.0, 3.0, -10.0), (0.0, 1.0, 0.0), (5.0, 1.0, 0.0)
+        )
+        self.assertAlmostEqual(contract.evidence()["camera_player_gap"], 10.198, places=2)
+
+    def test_the_failure_explains_the_offset_instead_of_naming_a_label(self):
+        spec = VerificationSpec.from_request("카메라가 Player를 추적하게 해줘")
+        prompt = fix_prompt(spec, ["camera_is_player_viewpoint"], {})
+        self.assertIn("자식", prompt)
+        self.assertIn("offset", prompt)
+
+
+class BoostRepairGuidanceTests(unittest.TestCase):
+    def test_boost_failure_names_the_velocity_assignment_that_erases_the_dash(self):
+        """실측된 실패 형태를 그대로 짚어야 한다.
+
+        모델은 대시를 AddForce impulse로 줬는데 같은 FixedUpdate가
+        rb.linearVelocity를 통째로 대입해 지웠다(측정 비율 1.04, repair 2회 실패).
+        기존 fix_prompt에는 boost 실패에 대한 안내가 아예 없었다.
+        """
+        spec = VerificationSpec.from_request("A/D 이동과 LeftShift 부스트를 구현해줘")
+        prompt = fix_prompt(spec, ["boost_distance_too_short"], {"motion_deltas": {}})
+        self.assertIn("linearVelocity", prompt)
+        self.assertIn("leftShiftKey", prompt)
+        self.assertIn(str(spec.boost_min_ratio), prompt)
+
+    def test_a_dash_that_launches_the_player_off_screen_is_rejected(self):
+        """실측: 0.5초에 140유닛(일반 이동의 56배)을 간 대시가 통과했다.
+
+        플레이어가 화면 밖으로 나가 뒤이은 카메라 측정까지 망가졌는데도 부스트는
+        통과였다 — 하한만 있었기 때문이다. 이동은 v1.11.4, 점프는 v1.11.9에서 같은
+        이유로 상한을 받았다.
+        """
+        spec = VerificationSpec.from_request("A/D 이동과 LeftShift 부스트를 구현해줘")
+        contract = VerificationContract(spec=spec, project_dir="")
+        contract.motion_before["boost_normal"] = (0.0, 1.0, 0.0)
+        contract.motion_after["boost_normal"] = (2.5, 1.0, 0.0)
+        contract.motion_before["boost_shift"] = (0.0, 1.0, 0.0)
+        contract.motion_after["boost_shift"] = (140.1, 1.0, 0.0)
+        self.assertIn("boost_moved_too_far", contract.failures())
+
+    def test_a_dash_within_the_observed_range_still_passes(self):
+        """기록된 정상 부스트는 1.0~6.6배였다. 그 범위를 막으면 안 된다."""
+        spec = VerificationSpec.from_request("A/D 이동과 LeftShift 부스트를 구현해줘")
+        for boosted in (5.2, 16.1):
+            with self.subTest(boosted=boosted):
+                contract = VerificationContract(spec=spec, project_dir="")
+                contract.motion_before["boost_normal"] = (0.0, 1.0, 0.0)
+                contract.motion_after["boost_normal"] = (2.44, 1.0, 0.0)
+                contract.motion_before["boost_shift"] = (0.0, 1.0, 0.0)
+                contract.motion_after["boost_shift"] = (boosted, 1.0, 0.0)
+                failures = contract.failures()
+                self.assertNotIn("boost_moved_too_far", failures)
+                self.assertNotIn("boost_distance_too_short", failures)
+
+    def test_excessive_boost_guidance_names_the_accumulating_impulse(self):
+        spec = VerificationSpec.from_request("A/D 이동과 LeftShift 부스트를 구현해줘")
+        prompt = fix_prompt(spec, ["boost_moved_too_far"], {})
+        self.assertIn("누적", prompt)
+        self.assertIn(str(spec.boost_max_ratio), prompt)
+
+    def test_boost_failure_also_questions_an_obstacle_in_the_path(self):
+        """실측: Platform이 플레이어 옆(x=3~7)에 놓여 오른쪽 이동이 2.06에서 멈췄다.
+
+        반대 방향은 4.96이었다. 막힌 방향에서는 부스트가 동작해도 비율이 1에
+        붙으므로, 코드를 고쳐서는 통과할 수 없다.
+        """
+        spec = VerificationSpec.from_request("A/D 이동과 LeftShift 부스트를 구현해줘")
+        prompt = fix_prompt(spec, ["boost_distance_too_short"], {"motion_deltas": {}})
+        self.assertIn("장애물", prompt)
+        self.assertIn("8유닛", prompt)
+
+
+class JumpGeometryGuidanceTests(unittest.TestCase):
+    def test_jump_failure_also_questions_the_layout_not_only_the_code(self):
+        """3층을 같은 X에 쌓아 Player 머리 위가 위층 바닥이었다.
+
+        스크립트의 래치·접지는 정상이었고 상승량이 정확히 0.0이었다. 코드만
+        고치라는 안내로는 두 번의 repair가 원인을 못 짚었다.
+        """
+        spec = VerificationSpec.from_request("3층짜리 플랫폼을 만들고 space로 점프하게 해줘")
+        prompt = fix_prompt(spec, ["player_did_not_jump"], {"motion_deltas": {}})
+        self.assertIn("천장", prompt)
+        self.assertIn("어긋나게", prompt)
+
+
+class BuilderCallClassificationTests(unittest.TestCase):
+    """빌더가 예산을 어디에 쓰는지 로그에서 세게 한다.
+
+    측정된 실행 38건 중 37건이 MAX_ITERS를 소진했고, 한 실행은 빌더 32회 중 16회를
+    자기 입력 테스트에 썼다(호스트가 직후 독립적으로 다시 잰다). 무엇을 줄일지
+    정하기 전에 분포가 로그에 있어야 한다.
+    """
+
+    def _agent(self):
+        agent = Agent.__new__(Agent)
+        agent._builder_call_kinds = {}
+        return agent
+
+    def test_calls_are_split_by_what_they_accomplish(self):
+        agent = self._agent()
+        agent._classify_builder_call("unity_create_gameobject", None)
+        agent._classify_builder_call("unity_write_script", None)
+        agent._classify_builder_call("unity_send_key", None)
+        agent._classify_builder_call("unity_wait", None)
+        agent._classify_builder_call("unity_get_gameobject", None)
+        agent._classify_builder_call("unity_write_script", "Policy blocked ...")
+        self.assertEqual(
+            agent._builder_call_kinds,
+            {"build": 2, "self_check": 3, "rejected": 1},
+        )
+
+    def test_a_blocked_call_is_rejected_not_build(self):
+        """차단된 호출은 예산을 쓰지만 아무것도 만들지 않는다."""
+        agent = self._agent()
+        agent._classify_builder_call("unity_create_scene", "Policy blocked ...")
+        self.assertEqual(agent._builder_call_kinds, {"rejected": 1})
 
 
 class HostOrchestrationTests(unittest.TestCase):

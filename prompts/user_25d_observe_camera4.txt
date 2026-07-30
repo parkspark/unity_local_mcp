@@ -1,0 +1,1 @@
+Assets/Scenes/User25DObserve4.unity 새 씬을 만들어서 2.5D 플랫포머 게임을 만들어줘. A, D키로 좌, 우로 이동하고, space 키로 점프를 함. Shift 키를 누르면 이동하던 방향으로 빠르게 X축 직선이동을 함. 카메라는 player 를 추적하며 관찰하게 해줘.

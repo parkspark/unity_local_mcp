@@ -40,6 +40,8 @@ Rules:
 - unity_screenshot creates missing output directories, saves a PNG and returns its path. You cannot see images — report the path to the user and ask them to look at it.
 - Prefer few, targeted tool calls. Do not dump the full hierarchy unless the user asks for it.
 - unity_create_scene with template="empty" gives a scene with NO camera and NO light — "새 빈 씬"/"empty scene" means no gameplay objects yet, not no camera. If the task involves a camera at all (following the player, framing the scene, a screenshot), call unity_create_scene with template="basic": it provides the `Main Camera` and light for you. A scene with no Camera renders nothing and every behaviour check that needs one is blocked before it runs.
+- Verification drives the player from where it spawns, so keep that corridor clear: no platform, wall or obstacle at the player's own height within ~8 units left and right of the start position. Put platforms beyond that or above. A block placed beside the player stops the run after a couple of units, and every distance-based check (movement, boost) then measures the obstacle instead of the code.
+- A follow camera OBSERVES the player; it is not the player's viewpoint. Never make Main Camera a child of the player and never place it at the player's position — the player is then invisible and the scene reads as first person. Keep it a separate root object and move it in LateUpdate to `target.position + offset`, where offset pulls back on Z and up on Y (2.5D side view: roughly `new Vector3(0, 2, -10)`). The host rejects a camera closer than 1.5 units to the player.
 - A camera is NOT a primitive. Never create one with unity_create_gameobject primitive="Cube" — that makes a cube named "Main Camera" that renders nothing. If you must build it by hand, create the object with no primitive (`{"name": "Main Camera", "position": [0, 5, -10]}`) and then unity_add_component component_type="Camera".
 - A tag only exists if the project defines it. In a scene you just created, `CompareTag("Ground")` and `tag = "Ground"` throw `Tag: Ground is not defined` at runtime. Decide ground contact from the collision normal (`Vector3.Dot(contact.normal, Vector3.up) > 0.5f`) instead of from a tag.
 
@@ -238,6 +240,32 @@ class Agent:
         self._verify_entered_play = False
         self._suppress_text = False
         self._turn_mutation_count = 0
+        self._builder_call_kinds: dict[str, int] = {}
+
+    # Builder-phase tool calls split by what they accomplish. Every measured run
+    # ends at MAX_ITERS (37 of 38 logged runs report model_loop_completed=false),
+    # and a hand count showed one builder spending 16 of 32 calls replaying its
+    # own input test that the host re-measures independently right after. That
+    # count has to come from the log, not from counting by hand, before anyone
+    # decides what to trim.
+    _SELF_TEST_TOOLS = {
+        "unity_play_mode", "unity_wait", "unity_send_key", "unity_get_input_state",
+        "unity_get_gameobject", "unity_get_state", "unity_get_hierarchy",
+        "unity_read_console", "unity_screenshot", "unity_list_assets",
+        "unity_read_script", "unity_read_level", "unity_ping",
+    }
+
+    def _classify_builder_call(self, name: str, violation: str | None) -> None:
+        """Count one builder tool call as build / self-check / rejected."""
+        if violation:
+            kind = "rejected"
+        elif name in MUTATION_TOOLS:
+            kind = "build"
+        elif name in self._SELF_TEST_TOOLS:
+            kind = "self_check"
+        else:
+            kind = "other"
+        self._builder_call_kinds[kind] = self._builder_call_kinds.get(kind, 0) + 1
 
     @staticmethod
     def _display(callback, *args):
@@ -416,6 +444,7 @@ class Agent:
         self.last_verification_receipt_path = None
         self._run_log_error = None
         self._turn_mutation_count = 0
+        self._builder_call_kinds = {}
         previous_tool_mode = getattr(self.tools, "tool_mode", "full")
         active_tool_mode = str(tool_mode or previous_tool_mode or "full").lower()
         self._active_tool_mode = active_tool_mode
@@ -1002,6 +1031,7 @@ class Agent:
             model_loop_completed=build_success,
             first_verification_failures=failures,
             build_stage_success=builder_stage_success,
+            builder_calls=dict(self._builder_call_kinds),
         )
         attempts.append({
             "phase": "verify", "attempt": 1,
@@ -1307,6 +1337,9 @@ class Agent:
 
         measured = check_report["measured_checks"]
         skipped = check_report["skipped_checks"]
+        unmapped = spec.unmapped_requirements()
+        if unmapped:
+            self._log("unmapped_requirements", clauses=unmapped)
         if success:
             report = "\n✅ 호스트 독립 검증 통과 — 실제 Unity 증거로 완료를 판정했습니다."
             report += f"\n측정한 검증 항목: {', '.join(measured) or '(없음)'}"
@@ -1329,6 +1362,19 @@ class Agent:
                 )
             if skipped:
                 report += f"\n측정하지 못한 검증 항목: {', '.join(skipped)}"
+        if unmapped:
+            # Recording stage: this never changes the verdict. It exists so a
+            # `verified` receipt cannot quietly stand for a subset of what was
+            # asked — the locomotion half passing says nothing about the half
+            # no check covers.
+            report += (
+                "\n\n⚠ 요청에 있으나 측정하지 않은 항목 "
+                f"({len(unmapped)}건) — 아래는 이번 판정의 근거가 아닙니다:"
+            )
+            for clause in unmapped[:5]:
+                report += f"\n  · {clause}"
+            if len(unmapped) > 5:
+                report += f"\n  · … 외 {len(unmapped) - 5}건"
         if receipt:
             report += f"\n검증 영수증: {receipt}"
         report += "\n"
@@ -1373,6 +1419,7 @@ class Agent:
 
             for name, args in calls:
                 args, violation = contract.prepare_call(name, args)
+                self._classify_builder_call(name, violation)
                 if violation:
                     result = json.dumps({"status": "error", "error": violation}, ensure_ascii=False)
                     self.on_warn(violation)

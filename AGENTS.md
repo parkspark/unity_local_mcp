@@ -1,7 +1,7 @@
 # AGENTS.md — unity_local_mcp 작업 규칙
 
 로컬 LLM(Ollama `qwen3-coder:30b`)으로 Unity Editor를 제어하는 에이전트 CLI.
-현재 v1.11.13. 이 저장소에서 작업하는 모든 에이전트는 아래 규칙을 따른다.
+현재 v1.11.15. 이 저장소에서 작업하는 모든 에이전트는 아래 규칙을 따른다.
 
 ---
 
@@ -75,7 +75,7 @@ uv run python main.py --prompt-file <파일>
 ## 5. 표준 명령
 
 ```bash
-# 테스트 (현재 193개 통과, subtest 20개 통과)
+# 테스트 (현재 220개 통과, subtest 40개 통과)
 uv run python -m pytest tests/
 
 # 로컬 모델 E2E — 빌더부터 전체
@@ -105,6 +105,8 @@ E2E는 오래 걸리므로 백그라운드 실행을 권한다
 | `skipped_checks` | 요청됐으나 측정 못 한 항목 |
 | `attempts` | 사이클별 실패 이력 (`verify` / `reverify` / `rollback`) |
 | `evidence` | 좌표 델타, 컴포넌트, 런타임 오류 등 원측정값 |
+| `camera_player_gap` | 측정 시점의 카메라–플레이어 거리. 1.5유닛 미만이면 관찰이 아니라 1인칭 시점이다 |
+| `unmapped_requirements` | 요청에 있으나 **어떤 검사도 측정하지 않은** 절. 비어 있지 않은 `verified`는 부분 집합만 통과한 것이다 |
 
 > **`measured_checks`가 비어 있는 `verified`는 무효다.** v1.11.2 이전에는 이 저장소의
 > `verified` 영수증 3건이 전부 Play Mode를 돌리지 않은 공집합 성공이었다.
@@ -155,5 +157,7 @@ main.py (CLI) → planner.py (큰 요청 → 마일스톤 분해)
 | v1.11.11 | **재현성 측정** — 새 씬 E2E **9/9** `build_stage_success=true`(repair 0회, 접지 오탐 0회). 그중 3회는 남은 스크립트를 지우고 시작. 스니펫 없는 항목의 빈 remedy 헤더 제거 | [문서](docs/v1.11.11_reproducibility_and_empty_remedy.md) |
 | v1.11.12 | **요청 형태 일반화** — 카메라 추종 요청에서 빌더 완결성 0/3. 콘솔 분류(런타임→컴파일 오계산), 태그 게이트 범위, 빈 씬 템플릿 차단을 고쳐 **3/3 회복**, 점프 형태 11/11 무회귀 | [문서](docs/v1.11.12_request_shape_generalization.md) |
 | v1.11.13 | **공집합 성공 재발 차단** — 격자 요청이 검사 0개로 `verified`가 되던 것을 `verification_spec_empty`로. 호스트 파일 도구에도 프로젝트 정체성 가드 적용. 레벨·부스트 형태는 통과 확인 | [문서](docs/v1.11.13_empty_spec_and_project_guard.md) |
+| v1.11.14 | **미매핑 요구사항 기록** — 이동만 측정하고 요청의 핵심(점수·소멸·클리어)은 안 재던 `verified`를 영수증·화면에 드러냄(오탐 0/32). 빌더 예산 분류 로깅. 사용자 실제 문장 둘이 드러낸 추출 공백 여덟 수정, 요청 문구 어휘를 `verification` 단일 출처로 통합, 부스트·점프 배치 수정 안내 추가 | [문서](docs/v1.11.14_unmapped_requirements.md) |
+| v1.11.15 | **카메라 관찰 판정·부스트 상한·카메라 스크립트 오탐 제거** — 시점 카메라가 추종 검사를 통과하던 것을 거리로 판정, `CameraController.cs` 13회 오차단 제거로 복합 요청 첫 `build_stage_success=true`, 140유닛 대시를 잡는 10배 상한 | [문서](docs/v1.11.15_camera_observation_and_boost_cap.md) |
 
 **현재 진행 상황과 다음 작업**: [docs/HANDOFF_2026-07-29.md](docs/HANDOFF_2026-07-29.md)

@@ -15,6 +15,9 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 import config
+from verification import (
+    AD_SCHEME, CAMERA_FOLLOW_WORDS, CAMERA_WORDS, FRESH_SCENE_PHRASES, has_word,
+)
 
 
 # Stop at the first recognised file extension.  The previous broad expression
@@ -123,15 +126,23 @@ def _content_digest(content: object) -> str:
     return hashlib.sha1(str(content or "").encode("utf-8")).hexdigest()
 
 
+# 카메라 추종 스크립트는 플레이어 입력 스크립트가 아니다. 파일명의 "controller"만
+# 보고 `CameraController.cs`에 Keyboard.current·linearVelocity·점프 래치·접지 검사를
+# 요구해 한 실행에서 13회를 차단했고, 빌더 예산의 절반이 거기서 사라졌다 — v1.11.10이
+# 되돌린 오탐과 같은 계열이다.
+_CAMERA_SCRIPT = re.compile(r"camera|follow", re.I)
+
+
 def _direct_keyboard_keys(request: str) -> set[str]:
     """Extract explicit keyboard controls that need no PlayerInput wiring."""
     if _ACTION_INPUT_WORKFLOW.search(request):
         return set()
     lowered = request.lower()
     keys: set[str] = set()
-    # Same scheme wording that verification.py's _AD_SCHEME accepts, so the
-    # measured keys and the enforced script keys cannot disagree.
-    if re.search(r"(?<![a-z0-9])(?:a\s*[/,·+]\s*d|d\s*[/,·+]\s*a)(?![a-z0-9])", lowered):
+    # verification.AD_SCHEME을 그대로 쓴다. 같은 뜻의 정규식을 두 벌 두었다가
+    # "ad키"와 "ad로"에서 두 번 갈라졌고, 그때마다 게이트가 강제하는 키와 호스트가
+    # 측정하는 키가 달라 올바른 구현이 떨어졌다.
+    if AD_SCHEME.search(request):
         keys.update({"aKey", "dKey"})
     if re.search(r"(?<![a-z0-9])wasd(?![a-z0-9])", lowered):
         keys.update({"wKey", "aKey", "sKey", "dKey"})
@@ -457,14 +468,13 @@ class TaskContract:
             allow_level_workflow=bool(_LEVEL_WORKFLOW.search(request)),
             direct_keyboard_keys=_direct_keyboard_keys(request),
             fresh_scene_requested=any(
-                phrase in request_lower
-                for phrase in ("새 빈 씬", "새 씬", "new empty scene", "new scene")
+                phrase in request_lower for phrase in FRESH_SCENE_PHRASES
             ),
-            camera_requested=any(
-                word in request_lower for word in ("카메라", "camera")
-            ) and any(
-                word in request_lower
-                for word in ("추종", "따라", "follow", "following", "스크린샷", "screenshot")
+            camera_requested=has_word(request_lower, CAMERA_WORDS) and (
+                has_word(request_lower, CAMERA_FOLLOW_WORDS)
+                or any(
+                    word in request_lower for word in ("스크린샷", "screenshot")
+                )
             ),
         )
 
@@ -550,7 +560,7 @@ class TaskContract:
                 input_behaviour = any(
                     marker in filename
                     for marker in ("player", "movement", "controller", "input", "character")
-                )
+                ) and not _CAMERA_SCRIPT.search(filename)
                 if input_behaviour:
                     # The gate reports what is wrong and lets the model rewrite
                     # it. Editing the content here would silently make the

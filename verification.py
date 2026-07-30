@@ -40,14 +40,44 @@ _MOVEMENT_CONTEXT_WORDS = ("플랫포머", "횡스크롤", "플레이어", "play
 _JUMP_WORDS = ("점프", "jump", "jumping", "착지", "landing")
 _JUMP_CONTEXT_WORDS = ("플랫포머", "platformer")
 _CAMERA_WORDS = ("카메라", "camera")
-_CAMERA_FOLLOW_WORDS = ("추종", "따라", "follow", "following")
+# "추적"이 빠져 있어 "카메라를 추가해서 플레이어를 추적하게해"가 카메라 검사를
+# 하나도 만들지 못했다. 사용자가 실제로 쓰는 낱말이다.
+_CAMERA_FOLLOW_WORDS = ("추종", "추적", "따라", "쫓", "follow", "following", "track", "tracking")
 _LEVEL_WORDS = ("levelloader", "level json", "레벨 json", "데이터 주도", "data-driven")
 _BOOST_WORDS = ("부스트", "boost", "dash", "대시")
-_BOOST_CONTEXT_WORDS = ("shift",)
+# 한글 표기가 빠져 있어 "좌쉬프트키를 누르면 순간적으로 가속"이 부스트로 잡히지
+# 않았다. 호스트 부스트 측정은 이동키와 leftShift를 함께 누르므로 이 요청에 맞다.
+_BOOST_CONTEXT_WORDS = ("shift", "쉬프트", "시프트", "쉬프트키", "시프트키")
 _LANDING_WORDS = ("착지", "land", "landing")
 # Control scheme named in the request. "A/D 좌우 이동" must be verified with A/D,
 # not with the harness's default arrow keys.
-_AD_SCHEME = re.compile(r"\ba\s*[/,·+]\s*d\b|\bd\s*[/,·+]\s*a\b|\bwasd\b", re.I)
+# 구분자 없는 "ad키"/"AD 키"는 사용자가 가장 흔히 쓰는 표기인데 빠져 있었다. 놓치면
+# 하네스가 방향키로 측정하고, A/D로 올바르게 구현한 게임을 떨어뜨린다 — v1.11.4가
+# 고친 것과 같은 계열의 결함이다.
+# 경계를 `\b`로 잡으면 안 된다 — 한글은 단어 문자라서 "D로"의 d와 로 사이에 경계가
+# 없고, "A, D로 이동"이 통째로 빠진다. _has_word와 같은 이유로 라틴 문자에 대해서만
+# 경계를 정의한다. 조사는 무엇이든("ad키", "ad로", "AD") 같은 조작 체계이므로 낱말
+# 자체로 인식한다 — 조사마다 패턴을 늘리다 "ad로"를 또 놓쳤다.
+_AD_SCHEME = re.compile(
+    r"(?<![a-z0-9])a\s*[/,·+]\s*d(?![a-z0-9])|"
+    r"(?<![a-z0-9])d\s*[/,·+]\s*a(?![a-z0-9])|"
+    r"(?<![a-z0-9])wasd(?![a-z0-9])|"
+    r"(?<![a-z0-9])ad(?![a-z0-9])|"
+    r"(?<![a-z0-9])da\s*(?:키|key)|"
+    r"(?<![a-z0-9])a\s*(?:와|and)\s*d(?![a-z0-9])",
+    re.I,
+)
+# 씬을 새로 만들라는 요청의 표기. "새씬"처럼 붙여 쓰는 형태가 빠져 있었다.
+FRESH_SCENE_PHRASES = (
+    "새 빈 씬", "새빈씬", "새 씬", "새씬", "빈 씬", "빈씬", "새로운 씬", "새로운씬",
+    "new empty scene", "new scene",
+)
+# 좌우 양방향을 뜻하는 표현. "ad키"에는 \ba\b도 \bd\b도 없어서 기존 판정이 양방향
+# 검사를 통째로 빠뜨렸다.
+_BIDIRECTIONAL_WORDS = ("좌우", "양쪽", "양방향", "left and right", "both directions")
+# 관찰 카메라와 1인칭 시점을 가르는 최소 거리. 기본 캡슐이 2유닛이므로 그 안쪽이면
+# 플레이어를 화면에 담을 수 없다. 2.5D 측면 카메라는 보통 8~12유닛 뒤에 있다.
+_CAMERA_MIN_GAP = 1.5
 _ARROW_SCHEME = re.compile(r"방향키|화살표|arrow\s*keys?", re.I)
 # Jump key named in the request. Same class of bug as the movement scheme:
 # testing space against a game bound to W fails it for the harness's assumption.
@@ -90,6 +120,86 @@ _VERIFICATION_REQUEST_PHRASES = re.compile(
     re.I,
 )
 
+# Requirements this module can actually turn into a measurement. A clause that
+# names none of these is something the request asked for and the host will never
+# look at.
+_COVERED_CONCEPT_WORDS = (
+    _MOVEMENT_WORDS + _JUMP_WORDS + _CAMERA_WORDS + _CAMERA_FOLLOW_WORDS
+    + _BOOST_WORDS + _LEVEL_WORDS
+    + ("좌우", "방향키", "키보드", "keyboard", "입력", "input", "카메라", "camera")
+)
+# Conditional and outcome language. A request sentence carrying one of these
+# promises behaviour beyond locomotion: something is gained, lost, destroyed,
+# counted or switched. The check vocabulary has no member for any of it, so the
+# sentence would be silently dropped while `movement` alone reports `verified`.
+_REQUIREMENT_MARKERS = re.compile(
+    r"에\s*닿으면|에\s*맞으면|충돌하면|부딪히면|먹으면|"
+    r"하면\s*\S*\s*(?:증가|감소|올라|내려|생기|사라|없어|바뀌|변경|표시)|"
+    r"할\s*때\s*\S*\s*(?:증가|감소|올라|내려|생기|사라|없어|바뀌|변경|표시)|"
+    r"획득|점수|스코어|score|체력|hp|목숨|life|lives|데미지|damage|"
+    r"사라지|없어지|제거되|파괴되|destroy|despawn|"
+    r"클리어|clear|게임\s*오버|game\s*over|승리|패배|"
+    r"소환|스폰|spawn|생성하는|개\s*생성|격자|보드|grid|board|"
+    # 구조·개수 요구. "3층짜리 플랫폼을 만들어"는 조건 표현이 없어 놓쳤는데,
+    # 층수가 맞는지 보는 검사는 어휘에 없다.
+    r"\d+\s*(?:층|개|칸|줄|단)(?:짜리|의)?|층짜리|multi[- ]?level|"
+    r"순찰|추적하는\s*적|자동으로\s*움직|patrol|"
+    r"on\s+collision|when\s+.*\s+(?:hits?|touches?|collides?)",
+    re.I,
+)
+# Sentence boundaries must not fall inside "Assets/Scenes/A.unity": a period
+# only ends a sentence when whitespace or the end of the request follows it.
+_SENTENCE_SPLIT = re.compile(r"(?:\.(?=\s)|\.$|[。!?\n])+")
+# A sentence usually bundles what IS measured with what is not — "Player가 A/D로
+# 이동하고 코인에 닿으면 점수가 1 올라가게". Judging the whole sentence lets the
+# locomotion half vouch for the half nothing will look at, which is the exact
+# failure this detector exists to find, so conjunctions are split first.
+_CLAUSE_SPLIT = re.compile(r"하고\s+|해서\s+|그리고\s+|,\s*|\s+및\s+|면서\s+")
+# Asset paths carry words the markers match by accident — the scene name
+# `GridProceduralRepro1.unity` contains "Grid" and flagged the sentence that
+# merely creates the scene. Paths are never a requirement clause.
+_ASSET_TOKEN = re.compile(r"\bAssets/\S+", re.I)
+
+
+def _unmapped_requirements(request: str, checks: Iterable[str]) -> list[str]:
+    """Name request clauses that no requested check will ever measure.
+
+    v1.11.13 refused runs whose check set was *empty*. This covers the harder
+    case: the score request above extracts `movement` and reports `verified`
+    without ever looking at the score — a subset reported as the whole.
+    Recording only; the verdict is unchanged until false positives are measured
+    on real prompts.
+    """
+    behaviour = [name for name in checks if not name.startswith("components:")]
+    found: list[str] = []
+    seen: set[str] = set()
+    text = _ASSET_TOKEN.sub(" ", request or "")
+    for sentence in _SENTENCE_SPLIT.split(text):
+        for raw in _CLAUSE_SPLIT.split(sentence):
+            clause = " ".join(raw.split())
+            if len(clause) < 6 or not _REQUIREMENT_MARKERS.search(clause):
+                continue
+            # A clause the existing vocabulary already speaks for is not
+            # unmapped: "부스트로 더 빨라지게" is measured, so is "카메라가
+            # 따라오게". With no behaviour check at all, nothing vouches for
+            # anything.
+            if behaviour and _has_word(clause.lower(), _COVERED_CONCEPT_WORDS):
+                continue
+            clause = clause[:120]
+            if clause not in seen:
+                seen.add(clause)
+                found.append(clause)
+    return found
+
+
+# task_contract가 같은 문장을 다르게 읽어 두 번 사고가 났다 — 정책 게이트가 강제하는
+# 키와 호스트가 측정하는 키가 갈라지면 올바른 구현이 떨어진다. 요청 문구 어휘는 이
+# 모듈이 단일 출처이고, 아래 이름으로만 공유한다.
+AD_SCHEME = _AD_SCHEME
+ARROW_SCHEME = _ARROW_SCHEME
+CAMERA_WORDS = _CAMERA_WORDS
+CAMERA_FOLLOW_WORDS = _CAMERA_FOLLOW_WORDS
+
 MUTATION_TOOLS = {
     "unity_create_gameobject", "unity_create_gameobjects", "unity_modify_gameobject",
     "unity_delete_gameobject", "unity_add_component", "unity_remove_component",
@@ -116,6 +226,9 @@ def _has_word(lower: str, words: Iterable[str]) -> bool:
         elif word in lower:
             return True
     return False
+
+
+has_word = _has_word
 
 
 def _decode(result: str) -> dict | None:
@@ -229,6 +342,12 @@ class VerificationSpec:
     jump_key: str = "space"
     boost_duration: float = 0.5
     boost_min_ratio: float = 1.4
+    # 하한만 있으면 "빨라지기는 했다"가 무엇이든 통과한다. 실측에서 0.5초에 140유닛을
+    # 간 대시(일반 이동의 56배)가 그대로 통과했고, 플레이어가 화면 밖으로 나가 뒤이은
+    # 카메라 측정까지 망가뜨렸다. 이동은 v1.11.4, 점프는 v1.11.9에서 같은 이유로 상한을
+    # 받았다. 기록된 부스트 28건은 정상 1.0~2.3에 하나가 6.6, 고장난 것이 53~60이라
+    # 10배면 양쪽에 여유가 있다.
+    boost_max_ratio: float = 10.0
     jump_min_rise: float = 0.5
     # Upper sanity bound, the jump counterpart of movement_max_speed. A latch
     # that re-arms while the key is held applies AddForce(..., Impulse) on
@@ -328,7 +447,9 @@ class VerificationSpec:
             ),
             require_boost=boost,
             require_bidirectional=movement and bool(
-                re.search(r"\ba\b", lower) and re.search(r"\bd\b", lower)
+                _AD_SCHEME.search(request)
+                or _has_word(lower, _BIDIRECTIONAL_WORDS)
+                or (re.search(r"\ba\b", lower) and re.search(r"\bd\b", lower))
             ),
             require_level_marker=level,
             require_screenshot=game,
@@ -374,6 +495,10 @@ class VerificationSpec:
             name for name in self.requested_checks()
             if name.split(":")[0] not in static
         ]
+
+    def unmapped_requirements(self) -> list[str]:
+        """Request clauses no requested check will measure. Diagnostic only."""
+        return _unmapped_requirements(self.request, self.requested_checks())
 
     def checklist(self) -> list[str]:
         checks = [
@@ -635,6 +760,22 @@ class VerificationContract:
         return any(item.lower() == required or item.lower().endswith("." + required)
                    for item in observed)
 
+    def _camera_player_gap(self, label: str | None) -> float | None:
+        """Distance between the camera and the player when a motion started.
+
+        The follow check compares displacements, and a camera sitting on the
+        player displaces identically — a first-person view passes it perfectly.
+        Separation is the property that distinguishes observing from being the
+        viewpoint, and it is computable from positions already collected.
+        """
+        camera = (
+            self.camera_motion_before.get(label) if label else self.camera_before
+        )
+        player = self.motion_before.get(label) if label else self.movement_before
+        if camera is None or player is None:
+            return None
+        return sum((c - p) ** 2 for c, p in zip(camera, player)) ** 0.5
+
     def failures(self) -> list[str]:
         failed: list[str] = [f"tool_error:{item}" for item in self.tool_errors]
         # A request that talks about runtime behaviour but yields no measurable
@@ -792,17 +933,34 @@ class VerificationContract:
             ):
                 failed.append("player_did_not_land")
         if self.spec.require_camera_follow:
-            camera_pair = next((
-                (self.camera_motion_before.get(label), self.camera_motion_after.get(label))
-                for label in ("d", "rightArrow")
+            label_used = next((
+                label for label in ("d", "rightArrow")
                 if self.camera_motion_before.get(label) is not None
-            ), (self.camera_before, self.camera_after))
+            ), None)
+            camera_pair = (
+                (self.camera_motion_before[label_used], self.camera_motion_after.get(label_used))
+                if label_used else (self.camera_before, self.camera_after)
+            )
             if "camera" in self.blocked_by:
                 pass
             elif None in camera_pair:
                 failed.append("camera_follow_not_measured")
+            # 여기에는 상한이 없다. 이동은 v1.11.4, 점프는 v1.11.9에서 하한만으로는
+            # 부족하다는 이유로 상한을 받았는데 카메라만 남아 있다. 다만 오늘 기록된
+            # 카메라 측정 20건을 재생해 보면 최종 측정의 카메라 이동이 전부 플레이어
+            # 이동과 0.04 이내로 일치했다 — 달아나는 카메라의 실측 사례가 아직 없다.
+            # 사례 없이 검사를 늘리는 것은 v1.11.7의 `.bounds`가 v1.11.10에서
+            # 되돌려진 방식이므로, 상한은 실제로 관측될 때 넣는다.
             elif camera_pair[1][0] - camera_pair[0][0] <= 1e-3:
                 failed.append("camera_did_not_follow")
+            else:
+                # 플레이어에 붙은 1인칭 시점 카메라는 변위가 정확히 같아서 위 검사를
+                # **완벽하게** 통과한다. 사용자가 직접 돌려보고 "카메라가 관찰이 아니라
+                # 시점으로 되어 있다"고 보고한 형태이고, 영수증에는 델타만 남아 있어
+                # 사후에 구분할 수도 없었다. 관찰하려면 떨어져 있어야 한다.
+                gap = self._camera_player_gap(label_used)
+                if gap is not None and gap < _CAMERA_MIN_GAP:
+                    failed.append("camera_is_player_viewpoint")
         if self.spec.require_camera_fixed_z:
             camera_pairs = [
                 (before, self.camera_motion_after.get(label))
@@ -829,6 +987,8 @@ class VerificationContract:
                 boosted = abs(boost_after[0] - boost_before[0])
                 if normal <= 1e-3 or boosted < normal * self.spec.boost_min_ratio:
                     failed.append("boost_distance_too_short")
+                elif boosted > normal * self.spec.boost_max_ratio:
+                    failed.append("boost_moved_too_far")
             if self.spec.require_left_boost:
                 left_before = self.motion_before.get("boost_left")
                 left_after = self.motion_after.get("boost_left")
@@ -943,6 +1103,19 @@ class VerificationContract:
             "player_jump_delta": delta(self.jump_before, self.jump_after),
             "player_jump_peak_y": self.jump_peak_y,
             "camera_follow_delta": delta(self.camera_before, self.camera_after),
+            # 델타만 남기면 플레이어에 붙은 시점 카메라와 제대로 따라오는 카메라를
+            # 영수증에서 구분할 수 없다. 둘 다 같은 변위를 낸다.
+            "camera_player_gap": next(
+                (
+                    round(gap, 3)
+                    for gap in (
+                        self._camera_player_gap(label)
+                        for label in ("d", "rightArrow", None)
+                    )
+                    if gap is not None
+                ),
+                None,
+            ),
             "screenshot": self.screenshot_path,
             "screenshot_captured_in_play": self.screenshot_in_play,
             "input_released": self.input_released,
@@ -987,6 +1160,7 @@ _FAILURE_CHECK_PREFIXES = (
     ("idle_drift_too_large", "idle_stability"),
     ("idle_stability_not_measured", "idle_stability"),
     ("camera_did_not_follow", "camera_follow"),
+    ("camera_is_player_viewpoint", "camera_follow"),
     ("camera_follow_not_measured", "camera_follow"),
     ("camera_z_changed", "camera_fixed_z"),
     ("camera_fixed_z_not_measured", "camera_fixed_z"),
@@ -995,6 +1169,7 @@ _FAILURE_CHECK_PREFIXES = (
     ("left_boost_distance_too_short", "left_boost"),
     ("left_boost_not_measured", "left_boost"),
     ("boost_distance_too_short", "boost"),
+    ("boost_moved_too_far", "boost"),
     ("boost_not_measured", "boost"),
     ("level_loaded_marker_missing", "level_marker"),
     ("play_screenshot_missing", "screenshot"),
@@ -1112,12 +1287,70 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
                 "(rb.linearVelocity = new Vector3(input * moveSpeed, rb.linearVelocity.y, 0)) "
                 "ForceMode.Force로 바꾸고, 최대 속도를 제한한다."
             )
+        if failure == "camera_is_player_viewpoint":
+            lint_guidance.append(
+                "- 카메라가 관찰이 아니라 1인칭 시점이 됐다: Main Camera가 Player와 "
+                "같은 자리에 있거나 Player의 자식이라 플레이어가 화면에 보이지 않는다. "
+                "카메라를 Player의 자식으로 두지 말고 별도 오브젝트로 유지한 뒤, "
+                "LateUpdate에서 target.position + offset으로 따라가게 한다. 2.5D "
+                "측면 뷰라면 offset은 Z로 물러나고 Y로 올라간 값이어야 한다"
+                "(예: new Vector3(0, 2, -10)). 카메라와 Player의 거리가 "
+                f"{_CAMERA_MIN_GAP}유닛 미만이면 관찰로 인정하지 않는다."
+            )
+        if failure == "boost_moved_too_far":
+            # 실측: 0.5초에 140유닛(일반 이동의 56배). shift를 누르고 있는 동안
+            # 매 FixedUpdate가 impulse를 다시 줘서 속도가 누적됐다.
+            lint_guidance.append(
+                "- 부스트 과다: shift를 누르고 있는 동안 매 FixedUpdate에서 impulse를 "
+                "다시 주면 속도가 누적돼 플레이어가 화면 밖으로 날아간다. 대시는 "
+                "속도 대입으로 표현하고(rb.linearVelocity = new Vector3(axis * "
+                "moveSpeed * boostMultiplier, rb.linearVelocity.y, 0f)), impulse로 "
+                "구현할 거라면 점프와 같은 rising edge 래치로 한 번만 적용한 뒤 "
+                "지속 시간이 끝나면 속도를 원래대로 되돌린다. 호스트는 부스트 거리가 "
+                f"일반 이동의 {spec.boost_max_ratio}배를 넘으면 실패로 판정한다."
+            )
+        if failure in {"boost_distance_too_short", "left_boost_distance_too_short"}:
+            # 실제 실행에서 본 형태: 대시를 AddForce impulse로 주는데 같은
+            # FixedUpdate가 rb.linearVelocity를 통째로 대입해 그 impulse를 지웠다.
+            # 측정 비율이 1.04로 나왔고 repair 2회가 원인을 못 짚었다.
+            lint_guidance.append(
+                "- 부스트가 측정되지 않음: 매 FixedUpdate에서 "
+                "rb.linearVelocity = new Vector3(axis * moveSpeed, ...)처럼 수평 속도를 "
+                "통째로 대입하면, 같은 프레임에 AddForce(..., ForceMode.Impulse)로 준 "
+                "대시 속도가 곧바로 덮여 사라진다. 대시를 속도 대입 자체에 반영해라 — "
+                "float speed = boosting ? moveSpeed * boostMultiplier : moveSpeed; "
+                "rb.linearVelocity = new Vector3(axis * speed, rb.linearVelocity.y, 0f); "
+                "boosting은 Keyboard.current.leftShiftKey.isPressed로 읽는다. "
+                "호스트는 이동키와 leftShift를 함께 0.5초 누른 거리를 같은 시간 일반 "
+                f"이동 거리와 비교해 {spec.boost_min_ratio}배 이상일 때만 통과시킨다."
+            )
+            # 실측: Platform이 x=3~7, 플레이어 높이에 놓여 오른쪽 이동이 2.06에서
+            # 멈췄다(반대 방향은 4.96). 막힌 방향에서는 부스트가 빨라져도 거리가
+            # 같으므로 비율이 1에 붙고, 코드를 고쳐서는 절대 통과할 수 없다.
+            lint_guidance.append(
+                "- 부스트 이전에 배치를 확인해라: 측정값에서 한쪽 이동 거리가 반대쪽보다 "
+                "현저히 짧으면 그 방향에 장애물이 있다는 뜻이다. 호스트는 시작 지점에서 "
+                "정해진 시간 동안 이동한 거리로 판정하므로, 막힌 방향에서는 부스트가 "
+                "동작해도 비율이 1에 가깝게 나온다. Player 시작 지점 좌우로 각 8유닛 "
+                "이상은 같은 높이에 막는 물체가 없어야 한다. 플랫폼은 그 바깥이나 "
+                "위쪽에 둔다."
+            )
         if failure == "player_did_not_jump":
             lint_guidance.append(
                 "- 점프 실패: CheckGrounded Raycast가 안정 착지 위치에서 확실히 "
                 "Collider를 맞히도록 거리/시작점을 Collider.bounds 기반으로 고치거나, "
                 "OnCollisionEnter의 contact.normal이 위를 향할 때 접지로 판정한다. "
                 f"{_JUMP_EDGE_GUIDANCE}"
+            )
+            # 실측된 형태: 층을 같은 X에 3유닛 간격으로 쌓아 Player 머리 바로 위가
+            # 다음 층 바닥이었다. 스크립트는 정상인데 상승량이 정확히 0.0이었다.
+            lint_guidance.append(
+                "- 점프 실패가 코드가 아니라 배치일 수 있다: 상승량이 정확히 0이면 "
+                "Player 머리 위에 천장이 있는지 먼저 확인해라. 여러 층을 같은 X 위에 "
+                "쌓으면 아래층 Player의 머리 바로 위가 위층 바닥이 되어 물리적으로 "
+                "뛸 수 없다. Player 콜라이더 상단에서 위로 최소 3유닛은 비워야 하며, "
+                "층은 수직으로만 쌓지 말고 X 방향으로 어긋나게(계단처럼) 배치한다. "
+                "Player는 최하층 평지 위, 위층 바닥과 겹치지 않는 X 위치에 둔다."
             )
         if failure == "player_jumped_too_high":
             lint_guidance.append(
@@ -1175,6 +1408,10 @@ def write_receipt(root_dir: str, spec: VerificationSpec, status: str, evidence: 
             "measured_checks": [],
             "skipped_checks": spec.requested_checks(),
         }),
+        # Requirements the request stated that no check will ever look at. A
+        # receipt that says `verified` while this list is non-empty verified a
+        # subset, and the reader has to be able to see which part.
+        "unmapped_requirements": spec.unmapped_requirements(),
         "spec": asdict(spec),
         "evidence": evidence,
         "failures": failures,
