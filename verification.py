@@ -55,6 +55,18 @@ _JUMP_KEY_SCHEMES = (
     (re.compile(r"\bw\s*(?:키|key)?\s*(?:로|으로)?\s*(?:점프|jump)", re.I), "w"),
     (re.compile(r"(?:위쪽\s*방향키|up\s*arrow|uparrow)\s*(?:키|key)?\s*(?:로|으로)?\s*(?:점프|jump)", re.I), "upArrow"),
 )
+# The single jump implementation this harness can actually measure. The bridge
+# re-queues a held key every editor tick, so wasPressedThisFrame can be gone
+# before gameplay Update runs; but a plain isPressed latch re-arms every frame
+# and stacks impulses. Both failure modes are fixed by an explicit rising edge.
+_JUMP_EDGE_GUIDANCE = (
+    "점프 입력은 Update에서 bool pressed = Keyboard.current.spaceKey.isPressed로 "
+    "읽고, 직전 프레임 상태를 담은 필드(예: jumpHeld)와 비교해 pressed && !jumpHeld일 "
+    "때만 jumpRequested = true로 세운 뒤 마지막에 jumpHeld = pressed로 갱신한다. "
+    "FixedUpdate에서는 jumpRequested && isGrounded일 때 impulse를 한 번 적용하고 "
+    "즉시 jumpRequested = false로 소비한다. wasPressedThisFrame 엣지에만 의존하지 "
+    "말고, !jumpHeld 없이 isPressed만 보고 래치하지도 않는다."
+)
 # Runtime-behaviour language that demands Play Mode proof. If a request uses any
 # of these but no concrete check could be derived, the host refuses to report
 # success instead of silently verifying nothing (verification_spec_empty).
@@ -177,6 +189,12 @@ class VerificationSpec:
     boost_duration: float = 0.5
     boost_min_ratio: float = 1.4
     jump_min_rise: float = 0.5
+    # Upper sanity bound, the jump counterpart of movement_max_speed. A latch
+    # that re-arms while the key is held applies AddForce(..., Impulse) on
+    # several physics steps and stacks the launch velocity, which cleared a
+    # min-rise-only check while sending the player ~20 units up and off the
+    # platform. A single impulse at a typical jumpForce rises about 5 units.
+    jump_max_rise: float = 10.0
     required_components: dict[str, list[str]] = field(default_factory=dict)
 
     def movement_max_distance(self, duration: float | None = None) -> float:
@@ -334,7 +352,10 @@ class VerificationSpec:
                 f"{self.idle_max_delta_x} 이하"
             )
         if self.require_jump:
-            checks.append(f"{self.jump_key} 입력 전후 Player Y가 실제로 증가")
+            checks.append(
+                f"{self.jump_key} 입력 전후 Player Y가 실제로 증가하되 "
+                f"{self.jump_max_rise:.0f} 이내"
+            )
         if self.require_camera_follow:
             checks.append("Player 이동과 같은 구간에 Main Camera X가 실제로 증가")
         if self.require_camera_fixed_z:
@@ -694,6 +715,8 @@ class VerificationContract:
                 failed.append("player_jump_not_measured")
             elif self.jump_peak_y - self.jump_before[1] < self.spec.jump_min_rise:
                 failed.append("player_did_not_jump")
+            elif self.jump_peak_y - self.jump_before[1] > self.spec.jump_max_rise:
+                failed.append("player_jumped_too_high")
             if (
                 self.spec.require_jump_landing
                 and "jump" not in self.blocked_by
@@ -882,6 +905,7 @@ class VerificationContract:
 _FAILURE_CHECK_PREFIXES = (
     ("player_did_not_land", "jump_landing"),
     ("player_did_not_jump", "jump"),
+    ("player_jumped_too_high", "jump"),
     ("player_jump_not_measured", "jump"),
     ("player_did_not_move_right", "movement"),
     ("player_moved_too_far", "movement"),
@@ -1020,15 +1044,19 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
                 "(rb.linearVelocity = new Vector3(input * moveSpeed, rb.linearVelocity.y, 0)) "
                 "ForceMode.Force로 바꾸고, 최대 속도를 제한한다."
             )
-        if "player_did_not_jump" in failure:
+        if failure == "player_did_not_jump":
             lint_guidance.append(
                 "- 점프 실패: CheckGrounded Raycast가 안정 착지 위치에서 확실히 "
-                "Collider를 맞히도록 거리/시작점을 Collider.bounds 기반으로 고친다. "
-                "Keyboard.current.spaceKey.isPressed는 Update에서 읽어 "
-                "jumpRequested=true로 저장하고, FixedUpdate에서 isGrounded일 때 "
-                "점프를 적용한 뒤 false로 소비한다. 브리지가 큐잉한 짧은 입력은 "
-                "wasPressedThisFrame 전환이 gameplay Update 전에 사라질 수 있으므로 "
-                "그 엣지에만 의존하지 않는다."
+                "Collider를 맞히도록 거리/시작점을 Collider.bounds 기반으로 고치거나, "
+                "OnCollisionEnter의 contact.normal이 위를 향할 때 접지로 판정한다. "
+                f"{_JUMP_EDGE_GUIDANCE}"
+            )
+        if failure == "player_jumped_too_high":
+            lint_guidance.append(
+                "- 점프 과다: 키를 누르고 있는 동안 래치가 계속 다시 서면 "
+                "AddForce(..., ForceMode.Impulse)가 여러 물리 스텝에 걸쳐 중첩돼 "
+                "발사 속도가 배로 커진다. 한 번 누를 때 impulse는 정확히 한 번만 "
+                f"적용돼야 한다. {_JUMP_EDGE_GUIDANCE}"
             )
     lint_section = "\n".join(dict.fromkeys(lint_guidance)) or "- 해당 없음"
     return f"""[독립 검증 실패 자동 수정 단계]

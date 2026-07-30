@@ -1,7 +1,7 @@
 # AGENTS.md — unity_local_mcp 작업 규칙
 
 로컬 LLM(Ollama `qwen3-coder:30b`)으로 Unity Editor를 제어하는 에이전트 CLI.
-현재 v1.11.8. 이 저장소에서 작업하는 모든 에이전트는 아래 규칙을 따른다.
+현재 v1.11.11. 이 저장소에서 작업하는 모든 에이전트는 아래 규칙을 따른다.
 
 ---
 
@@ -71,7 +71,7 @@ uv run python main.py --prompt-file <파일>
 ## 5. 표준 명령
 
 ```bash
-# 테스트 (현재 160개 통과)
+# 테스트 (현재 181개 통과, subtest 20개 통과)
 uv run python -m pytest tests/
 
 # 로컬 모델 E2E — 빌더부터 전체
@@ -146,5 +146,8 @@ main.py (CLI) → planner.py (큰 요청 → 마일스톤 분해)
 | v1.11.6 | 점프 키 명세, 개발 의존성 정리 | [문서](docs/v1.11.6_jump_key_and_dev_deps.md) |
 | v1.11.7 | 엄격한 새 씬 전체 E2E 첫 통과, 검증 배관 신뢰성 보강 | [문서](docs/v1.11.7_fresh_scene_e2e_reliability.md) |
 | v1.11.8 | **빌더 자체 완결성** — 첫 호스트 검증 무수정 통과, 직접 키보드 정책·저장 장벽 | [문서](docs/v1.11.8_builder_stage_completeness.md) |
+| v1.11.9 | 점프 상한 검증(`player_jumped_too_high`), rising edge 래치, 정책 게이트의 스크립트 대필 제거. 점프 +19.96 → **+4.98 · 착지 true**. 대가로 `build_stage_success` 후퇴 | [문서](docs/v1.11.9_bounded_jump_and_unrewritten_scripts.md) |
+| v1.11.10 | 정책 게이트 오탐 제거 — 접지 판정을 철자에서 결함 조건으로, 헬퍼 호출 추적, 차단 메시지에 코드 첨부, 무의미한 재작성 차단. **`build_stage_success=true` · `attempts=1` 회복** | [문서](docs/v1.11.10_gate_false_positive.md) |
+| v1.11.11 | **재현성 측정** — 새 씬 E2E 5회 연속 `build_stage_success=true`(repair 0회, 오탐 0회), 변경 후 1회 더해 **6/6**. 스니펫 없는 항목의 빈 remedy 헤더 제거 | [문서](docs/v1.11.11_reproducibility_and_empty_remedy.md) |
 
 **현재 진행 상황과 다음 작업**: [docs/HANDOFF_2026-07-29.md](docs/HANDOFF_2026-07-29.md)

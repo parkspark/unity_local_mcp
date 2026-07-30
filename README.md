@@ -4,7 +4,7 @@
 ![alt text](data/0703_unity_mcp1.gif)
 
 
-로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.8**이다.
+로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.11**이다.
 기존 [unity_mcp](../unity_mcp) MCP 서버와 Unity 브리지를 재사용하고
 (v1.7부터 send_key 등 일부 확장), Claude Code의 자리를 로컬 모델이 대신한다.
 
@@ -405,3 +405,33 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           존재하지 않던 새 씬의 전체 E2E가 repair 없이 첫 검증에서 5/5를 측정해
           `build_stage_success=true`, `attempts=1`, `skipped_checks=[]`를 기록했습니다.
           상세: [docs/v1.11.8_builder_stage_completeness.md](docs/v1.11.8_builder_stage_completeness.md)
+
+- ver 1.11.9 - **점프 상한 검증과 하네스 대필 제거.** v1.11.8은 20유닛 솟아올라
+          착지하지 못한 점프를 `verified`로 통과시켰습니다. 이동에만 있던 sanity 상한을
+          점프에도 추가하고(`player_jumped_too_high`), 임펄스가 중첩되지 않는 rising
+          edge 래치를 표준으로 요구합니다. 정책 게이트가 모델의 스크립트를 정규식으로
+          직접 고쳐 쓰던 동작은 제거해, 영수증이 다시 로컬 모델의 산출물을 가리키게
+          했습니다. 새 씬 E2E에서 점프 상승량이 +19.96 → **+4.98**로 잡히고
+          `jump_landed=true`, 요청 6개 검사를 모두 실측했습니다. 다만 게이트가 엄격해진
+          대가로 빌더가 iteration 한도에 닿아 `build_stage_success`는 false로
+          후퇴했습니다(repair 1회로 통과).
+          상세: [docs/v1.11.9_bounded_jump_and_unrewritten_scripts.md](docs/v1.11.9_bounded_jump_and_unrewritten_scripts.md)
+
+- ver 1.11.10 - **정책 게이트 오탐 제거.** v1.11.9의 게이트는 정상 동작하는 접지 코드를
+          문자열 `.bounds`가 없다는 이유로 막아 빌더를 14회 차단시켰고, 모델이 파일명을
+          바꾸며 스크립트를 271자까지 줄이는 회피에 예산을 소진했습니다. 접지 판정을
+          철자에서 실제 결함(대입되지 않는 인스펙터 필드)으로 바꾸고, Update가 호출하는
+          헬퍼까지 추적하며, 차단 메시지에 라벨 대신 실행 가능한 코드를 첨부합니다.
+          바이트 동일 재작성도 차단합니다. 새 씬 E2E가 write 2회·repair 0회로
+          `build_stage_success=true`, `attempts=1`, 6개 검사 전부 실측했습니다.
+          상세: [docs/v1.11.10_gate_false_positive.md](docs/v1.11.10_gate_false_positive.md)
+
+- ver 1.11.11 - **통과의 재현성 측정(n=6)과 빈 remedy 헤더 제거.** v1.11.10의
+          `build_stage_success=true`는 n=1이었습니다. 씬 경로만 바꿔 새 씬 E2E를 5회
+          연속 돌린 결과 **5/5가 repair 0회로 첫 검증을 통과**했고, 점프 상승량이
+          +4.97~+4.99로 상한 아래 안정적으로 모였습니다. 접지 오탐 재발은 0회이고,
+          두 번의 차단은 모두 실제 결함(미정의 Ground 태그, rising-edge 가드 누락)으로
+          다음 write에서 곧바로 통과했습니다. 측정 중 드러난 결함 하나 — 스니펫이 없는
+          항목에서 "이 형태로 고쳐라" 헤더 아래가 비어 나가던 문제 — 를 고쳤습니다.
+          변경 후 1회를 더해 통산 6/6입니다.
+          상세: [docs/v1.11.11_reproducibility_and_empty_remedy.md](docs/v1.11.11_reproducibility_and_empty_remedy.md)

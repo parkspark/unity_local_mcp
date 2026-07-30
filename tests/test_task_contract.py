@@ -112,6 +112,35 @@ class TaskContractTests(unittest.TestCase):
         )
         self.assertIn("did not explicitly scope", error)
 
+    def test_behaviour_verification_wording_requires_input_measurement(self):
+        for request in (
+            "이동과 점프가 실제로 되는지 검증까지 끝내줘",
+            "A/D 이동이 동작하는지 확인해줘",
+            "점프가 실제로 동작하는지 봐줘",
+        ):
+            with self.subTest(request=request):
+                self.assertTrue(TaskContract.from_request(request).require_input_sim)
+
+    def test_read_only_wording_does_not_demand_play_mode(self):
+        """A bare 확인/test must not force a Play Mode input measurement."""
+        for request in (
+            "PlayerMovement 스크립트를 확인해줘",
+            "이동 스크립트에 오타가 없는지 확인해줘",
+            "movement 관련 테스트 코드를 정리해줘",
+        ):
+            with self.subTest(request=request):
+                contract = TaskContract.from_request(request)
+                self.assertFalse(contract.require_input_sim)
+                self.assertFalse(contract.require_play)
+
+    def test_ad_scheme_matches_the_verification_layer(self):
+        """The enforced script keys must not disagree with the measured keys."""
+        for request in ("A, D로 이동", "A/D 이동", "D+A 이동", "WASD 이동"):
+            with self.subTest(request=request):
+                keys = TaskContract.from_request(request).direct_keyboard_keys
+                self.assertIn("aKey", keys)
+                self.assertIn("dKey", keys)
+
     def test_explicit_simple_keys_require_direct_keyboard_script(self):
         contract = TaskContract.from_request(
             "New Input System으로 A/D 이동과 Space 점프를 구현해줘"
@@ -131,10 +160,12 @@ class TaskContractTests(unittest.TestCase):
             "path": "Assets/Scripts/PlayerMovement.cs",
             "content": (
                 "using UnityEngine.InputSystem; class PlayerMovement { "
-                "bool jumpRequested; Collider collider; Rigidbody rb; void Update() { "
+                "bool jumpRequested; bool jumpHeld; Collider collider; Rigidbody rb; "
+                "void Update() { "
                 "var keyboard = Keyboard.current; var a = keyboard.aKey; "
-                "var d = keyboard.dKey; if (keyboard.spaceKey.isPressed) "
-                "jumpRequested = true; } void FixedUpdate() { "
+                "var d = keyboard.dKey; bool pressed = keyboard.spaceKey.isPressed; "
+                "if (pressed && !jumpHeld) jumpRequested = true; jumpHeld = pressed; } "
+                "void FixedUpdate() { "
                 "rb.linearVelocity = new Vector3(0, rb.linearVelocity.y, 0); "
                 "var bottom = collider.bounds.min; jumpRequested = false; } }"
             ),
@@ -172,9 +203,10 @@ class TaskContractTests(unittest.TestCase):
                 "content": (
                     "using UnityEngine.InputSystem;\n"
                     "class PlayerMovement {\n"
-                    "bool jumpRequested; Rigidbody rb;\n"
+                    "bool jumpRequested; bool jumpHeld; Rigidbody rb;\n"
                     "void Update() { var k = Keyboard.current; var a = k.aKey; "
-                    "var d = k.dKey; if (k.spaceKey.isPressed) jumpRequested = true; }\n"
+                    "var d = k.dKey; bool pressed = k.spaceKey.isPressed; "
+                    "if (pressed && !jumpHeld) jumpRequested = true; jumpHeld = pressed; }\n"
                     "void FixedUpdate() { rb.linearVelocity = Vector3.zero; "
                     "jumpRequested = false; }\n"
                     "void OnCollisionStay(Collision collision) { foreach "
@@ -186,21 +218,264 @@ class TaskContractTests(unittest.TestCase):
         )
         self.assertIsNone(error)
 
-    def test_direct_keyboard_jump_normalizes_short_edge_read(self):
+    def test_direct_keyboard_jump_rejects_level_triggered_latch(self):
+        """isPressed without a rising edge stacks one impulse per physics step.
+
+        This is the v1.11.8 regression: the receipt measured a +19.96 unit rise
+        that never landed, and jump had no upper bound to catch it.
+        """
         contract = TaskContract.from_request(
             "A/D 이동과 Space 점프가 실제로 되는지 검증해줘"
         )
-        prepared, error = contract.prepare_call(
+        _, error = contract.prepare_call(
             "unity_write_script",
             {
                 "path": "Assets/Scripts/PlayerMovement.cs",
                 "content": (
                     "using UnityEngine.InputSystem;\n"
                     "class PlayerMovement {\n"
-                    "bool jumpRequested; Rigidbody rb;\n"
+                    "bool jumpRequested; bool isGrounded; Rigidbody rb; Collider collider;\n"
                     "void Update() { var k = Keyboard.current; var a = k.aKey; "
-                    "var d = k.dKey; if (k.spaceKey.wasPressedThisFrame) "
+                    "var d = k.dKey; if (k.spaceKey.isPressed && isGrounded) "
                     "jumpRequested = true; }\n"
+                    "void FixedUpdate() { rb.linearVelocity = Vector3.zero; "
+                    "var bottom = collider.bounds.min; jumpRequested = false; }\n"
+                    "}"
+                ),
+            },
+        )
+        self.assertIn("Update rising-edge guard", error)
+
+    def test_direct_keyboard_jump_rejects_edge_only_read(self):
+        contract = TaskContract.from_request(
+            "A/D 이동과 Space 점프가 실제로 되는지 검증해줘"
+        )
+        _, error = contract.prepare_call(
+            "unity_write_script",
+            {
+                "path": "Assets/Scripts/PlayerMovement.cs",
+                "content": (
+                    "using UnityEngine.InputSystem;\n"
+                    "class PlayerMovement {\n"
+                    "bool jumpRequested; bool jumpHeld; Rigidbody rb; Collider collider;\n"
+                    "void Update() { var k = Keyboard.current; var a = k.aKey; "
+                    "var d = k.dKey; if (k.spaceKey.wasPressedThisFrame && !jumpHeld) "
+                    "{ jumpRequested = true; jumpHeld = true; } }\n"
+                    "void FixedUpdate() { rb.linearVelocity = Vector3.zero; "
+                    "var bottom = collider.bounds.min; jumpRequested = false; }\n"
+                    "}"
+                ),
+            },
+        )
+        self.assertIn("Update read of spaceKey.isPressed", error)
+
+    def test_direct_keyboard_script_content_is_never_rewritten(self):
+        """The gate reports gaps; it must not author the script itself."""
+        contract = TaskContract.from_request(
+            "A/D 이동과 Space 점프가 실제로 되는지 검증해줘"
+        )
+        original = (
+            "using UnityEngine.InputSystem;\n"
+            "class PlayerMovement {\n"
+            "bool jumpRequested; bool jumpHeld; Rigidbody rb;\n"
+            "void Update() { var k = Keyboard.current; var a = k.aKey; "
+            "var d = k.dKey; bool pressed = k.spaceKey.wasPressedThisFrame; "
+            "if (pressed && !jumpHeld) jumpRequested = true; jumpHeld = pressed; }\n"
+            "void FixedUpdate() { rb.linearVelocity = Vector3.zero; "
+            "jumpRequested = false; }\n"
+            "void OnCollisionEnter(Collision collision) { "
+            "if (collision.gameObject.CompareTag(\"Ground\")) { isGrounded = true; } }\n"
+            "}"
+        )
+        prepared, error = contract.prepare_call(
+            "unity_write_script",
+            {"path": "Assets/Scripts/PlayerMovement.cs", "content": original},
+        )
+        self.assertIsNotNone(error)
+        self.assertEqual(prepared["content"], original)
+
+    JUMP_REQUEST = "A/D 이동과 Space 점프가 실제로 되는지 검증해줘"
+
+    def _write(self, body: str, contract=None):
+        contract = contract or TaskContract.from_request(self.JUMP_REQUEST)
+        content = (
+            "using UnityEngine;\nusing UnityEngine.InputSystem;\n"
+            "public class PlayerMovement : MonoBehaviour {\n"
+            "bool jumpRequested; bool jumpHeld; bool isGrounded;\n"
+            "Rigidbody rb; float moveSpeed = 5f; float jumpForce = 10f;\n"
+            "void Update() {\n"
+            "  var keyboard = Keyboard.current; if (keyboard == null) return;\n"
+            "  float axis = keyboard.dKey.isPressed ? 1f : (keyboard.aKey.isPressed ? -1f : 0f);\n"
+            "  rb.linearVelocity = new Vector3(axis * moveSpeed, rb.linearVelocity.y, 0f);\n"
+            "  bool pressed = keyboard.spaceKey.isPressed;\n"
+            "  if (pressed && !jumpHeld && isGrounded) jumpRequested = true;\n"
+            "  jumpHeld = pressed;\n"
+            "}\n"
+            "void FixedUpdate() {\n"
+            "  if (jumpRequested && isGrounded) { "
+            "rb.AddForce(Vector3.up * jumpForce, ForceMode.Impulse); jumpRequested = false; }\n"
+            "}\n"
+            f"{body}\n"
+            "}"
+        )
+        return contract.prepare_call(
+            "unity_write_script",
+            {"path": "Assets/Scripts/PlayerMovement.cs", "content": content},
+        )
+
+    def test_identical_rewrite_is_blocked_as_a_no_op(self):
+        """Resending the bytes already on disk cannot change verification.
+
+        A repair loop spent four of its five writes resending one byte-identical
+        file, then reported no_verification_progress.
+        """
+        contract = TaskContract.from_request(self.JUMP_REQUEST)
+        args = {
+            "path": "Assets/Scripts/Enemy.cs",
+            "content": "public class Enemy {}",
+        }
+        prepared, error = contract.prepare_call("unity_write_script", dict(args))
+        self.assertIsNone(error)
+        contract.observe("unity_write_script", prepared, OK)
+
+        _, error = contract.prepare_call("unity_write_script", dict(args))
+        self.assertIn("byte-identical", error)
+
+        changed = dict(args, content="public class Enemy { int hp; }")
+        _, error = contract.prepare_call("unity_write_script", changed)
+        self.assertIsNone(error)
+
+    def test_latch_in_helper_called_from_update_is_accepted(self):
+        """`void Update() { HandleInput(); }` runs the same code as inline.
+
+        v1.11.10's first E2E blocked this three times: the gate read only
+        Update's literal body, saw two helper calls, and reported the whole
+        latch missing. The property under test is what runs per frame, not
+        which method the statements are typed into.
+        """
+        contract = TaskContract.from_request(self.JUMP_REQUEST)
+        content = (
+            "using UnityEngine;\nusing UnityEngine.InputSystem;\n"
+            "public class PlayerMovement : MonoBehaviour {\n"
+            "bool jumpRequested; bool jumpHeld; bool isGrounded;\n"
+            "Rigidbody rb; float moveSpeed = 5f; float jumpForce = 10f;\n"
+            "void Update() { HandleInput(); CheckGrounded(); }\n"
+            "void FixedUpdate() { ApplyJump(); }\n"
+            "void HandleInput() {\n"
+            "  var keyboard = Keyboard.current; if (keyboard == null) return;\n"
+            "  float axis = keyboard.dKey.isPressed ? 1f : (keyboard.aKey.isPressed ? -1f : 0f);\n"
+            "  rb.linearVelocity = new Vector3(axis * moveSpeed, rb.linearVelocity.y, 0f);\n"
+            "  bool pressed = keyboard.spaceKey.isPressed;\n"
+            "  if (pressed && !jumpHeld && isGrounded) jumpRequested = true;\n"
+            "  jumpHeld = pressed;\n"
+            "}\n"
+            "void ApplyJump() {\n"
+            "  if (jumpRequested && isGrounded) { "
+            "rb.AddForce(Vector3.up * jumpForce, ForceMode.Impulse); jumpRequested = false; }\n"
+            "}\n"
+            "void CheckGrounded() { isGrounded = "
+            "Physics.Raycast(transform.position, Vector3.down, 1.5f); }\n"
+            "}"
+        )
+        _, error = contract.prepare_call(
+            "unity_write_script",
+            {"path": "Assets/Scripts/PlayerMovement.cs", "content": content},
+        )
+        self.assertIsNone(error)
+
+    def test_plain_downward_raycast_grounding_is_accepted(self):
+        """v1.11.9 rejected this correct code 14 times in one E2E run.
+
+        Requiring the literal `.bounds` or an OnCollision method was checking a
+        spelling, not a defect. The model kept writing a working raycast and the
+        gate kept blocking it, which pushed it into renaming and shrinking the
+        script until the iteration budget was gone.
+        """
+        _, error = self._write(
+            "void CheckGrounded() { isGrounded = "
+            "Physics.Raycast(transform.position, Vector3.down, 1.5f); }"
+        )
+        self.assertIsNone(error)
+
+    def test_unassigned_layermask_grounding_is_rejected(self):
+        """An unset LayerMask is 0, so the check can never succeed."""
+        _, error = self._write(
+            "public LayerMask groundLayer;\n"
+            "void CheckGrounded() { isGrounded = Physics.Raycast("
+            "transform.position, Vector3.down, 1.5f, groundLayer); }"
+        )
+        self.assertIn("groundLayer is never assigned", error)
+
+    def test_layermask_assigned_in_code_is_accepted(self):
+        _, error = self._write(
+            "LayerMask groundLayer = ~0;\n"
+            "void CheckGrounded() { isGrounded = Physics.Raycast("
+            "transform.position, Vector3.down, 1.5f, groundLayer); }"
+        )
+        self.assertIsNone(error)
+
+    def test_null_guarded_ground_transform_is_accepted(self):
+        _, error = self._write(
+            "public Transform groundCheck;\n"
+            "void CheckGrounded() { var origin = groundCheck != null ? "
+            "groundCheck.position : transform.position; "
+            "isGrounded = Physics.CheckSphere(origin, 0.2f); }"
+        )
+        self.assertIsNone(error)
+
+    def test_missing_ground_check_entirely_is_rejected(self):
+        _, error = self._write("// no ground check at all")
+        self.assertIn("self-contained ground check", error)
+
+    def test_block_message_carries_code_not_just_labels(self):
+        """Labels alone took 14 attempts; the repair prompt's code took one."""
+        _, error = self._write("// no ground check at all")
+        self.assertIn("Fix the first item with exactly this shape:", error)
+        self.assertIn("Physics.Raycast(col.bounds.center, Vector3.down", error)
+
+    def test_grounding_example_does_not_teach_an_inside_the_capsule_offset(self):
+        """The remedy must not repeat the defect it exists to prevent.
+
+        A default capsule's bottom is at local y = -1, so a child point at
+        (-height/2 + radius) = -0.5 sits inside it and a short ray from there
+        never reaches the floor. That exact formula failed a live E2E.
+        """
+        _, error = self._write("// no ground check at all")
+        remedy = error.split("Fix the first item with exactly this shape:")[1]
+        code = [
+            line for line in remedy.splitlines()
+            if line.strip() and not line.strip().startswith("//")
+        ]
+        self.assertFalse(
+            any("localPosition" in line for line in code),
+            "remedy must not place a child ground-check point at a guessed offset",
+        )
+        self.assertIn("bounds", "\n".join(code))
+
+    def test_repeated_blocks_warn_that_renaming_does_not_help(self):
+        contract = TaskContract.from_request(self.JUMP_REQUEST)
+        for _ in range(2):
+            self._write("// no ground check at all", contract)
+        _, error = self._write("// no ground check at all", contract)
+        self.assertIn("renaming the file", error)
+        self.assertIn("block #3", error)
+
+    def test_fresh_scene_jump_rejects_undefined_ground_tag(self):
+        contract = TaskContract.from_request(
+            "Assets/Scenes/Fresh.unity에 새 빈 씬을 만들고 "
+            "A/D 이동과 Space 점프를 구현해줘"
+        )
+        _, error = contract.prepare_call(
+            "unity_write_script",
+            {
+                "path": "Assets/Scripts/PlayerMovement.cs",
+                "content": (
+                    "using UnityEngine.InputSystem;\n"
+                    "class PlayerMovement {\n"
+                    "bool jumpRequested; bool jumpHeld; bool isGrounded; Rigidbody rb;\n"
+                    "void Update() { var k = Keyboard.current; var a = k.aKey; "
+                    "var d = k.dKey; bool pressed = k.spaceKey.isPressed; "
+                    "if (pressed && !jumpHeld) jumpRequested = true; jumpHeld = pressed; }\n"
                     "void FixedUpdate() { rb.linearVelocity = Vector3.zero; "
                     "jumpRequested = false; }\n"
                     "void OnCollisionEnter(Collision collision) { "
@@ -210,11 +485,21 @@ class TaskContractTests(unittest.TestCase):
                 ),
             },
         )
-        self.assertIsNone(error)
-        self.assertIn("spaceKey.isPressed", prepared["content"])
-        self.assertNotIn("spaceKey.wasPressedThisFrame", prepared["content"])
-        self.assertIn("collision.gameObject != gameObject", prepared["content"])
-        self.assertNotIn('CompareTag("Ground")', prepared["content"])
+        self.assertIn('no CompareTag("Ground")', error)
+        # The label was the only gap here, and it had no snippet, so the message
+        # printed the "fix it with this shape" header over an empty body — the
+        # bare-label failure v1.11.10 exists to end. Seen in a live E2E run.
+        self.assertIn("contact.normal", error)
+        self.assertIn("OnCollisionStay", error)
+        self.assertNotIn("exactly this shape:\n\n", error)
+
+    def test_block_message_omits_the_code_header_when_no_snippet_applies(self):
+        contract = TaskContract.from_request(self.JUMP_REQUEST)
+        message = contract._input_script_block_message(
+            "Assets/Scripts/PlayerMovement.cs", ["some gap with no remedy"]
+        )
+        self.assertNotIn("Fix the first item with exactly this shape:", message)
+        self.assertIn("some gap with no remedy", message)
 
     def test_direct_keyboard_script_rejects_legacy_input_api_mixing(self):
         contract = TaskContract.from_request(
@@ -253,9 +538,11 @@ class TaskContractTests(unittest.TestCase):
             "path": "Assets/Scripts/PlayerMovement.cs",
             "content": (
                 "using UnityEngine.InputSystem; class PlayerMovement { "
-                "bool jumpRequested; Rigidbody rb; Collider collider; void Update() { "
+                "bool jumpRequested; bool jumpHeld; Rigidbody rb; Collider collider; "
+                "void Update() { "
                 "var k = Keyboard.current; var a = k.aKey; var d = k.dKey; "
-                "if (k.spaceKey.isPressed) jumpRequested = true; } "
+                "bool pressed = k.spaceKey.isPressed; "
+                "if (pressed && !jumpHeld) jumpRequested = true; jumpHeld = pressed; } "
                 "void FixedUpdate() { rb.linearVelocity = Vector3.zero; "
                 "var bottom = collider.bounds.min; jumpRequested = false; } }"
             ),

@@ -213,6 +213,40 @@ class BehaviourSpecExtractionTests(unittest.TestCase):
         self.assertIn("gameplay", report["measured_checks"])
         self.assertNotIn("jump", report["skipped_checks"])
 
+    def _jump_failures(self, rise: float) -> list[str]:
+        spec = VerificationSpec.from_request(self.JUMP_FIX_REQUEST)
+        with tempfile.TemporaryDirectory() as project:
+            contract = VerificationContract(spec=spec, project_dir=project)
+            contract.state_seen = True
+            contract.scene_clean = True
+            contract.compile_checked = True
+            contract.played = True
+            contract.waited = True
+            contract.runtime_checked = True
+            contract.jump_before = (0.0, 1.0, 0.0)
+            contract.jump_peak_y = 1.0 + rise
+            return contract.failures()
+
+    def test_jump_rise_within_bounds_passes(self):
+        self.assertNotIn("player_jumped_too_high", self._jump_failures(5.0))
+        self.assertNotIn("player_did_not_jump", self._jump_failures(5.0))
+
+    def test_stacked_impulse_jump_is_not_reported_as_success(self):
+        """A latch that re-arms while the key is held launches ~4x too high.
+
+        v1.11.8 measured a +19.96 unit rise that never landed and still wrote
+        status=verified, because jump had a minimum but no maximum.
+        """
+        failures = self._jump_failures(19.962933)
+        self.assertIn("player_jumped_too_high", failures)
+        self.assertEqual(failure_check_name("player_jumped_too_high"), "jump")
+
+    def test_jump_checklist_states_the_upper_bound(self):
+        spec = VerificationSpec.from_request(self.JUMP_FIX_REQUEST)
+        self.assertTrue(
+            any(f"{spec.jump_max_rise:.0f} 이내" in line for line in spec.checklist())
+        )
+
 
 class PolicyLintTests(unittest.TestCase):
     def test_platformer_policy_violations_are_found_before_play(self):
@@ -1019,13 +1053,19 @@ class RepairPromptGuidanceTests(unittest.TestCase):
         self.assertIn("해당 컴포넌트가 이미 있으면 제거", prompt)
         self.assertIn("legacy UnityEngine.Input API는 사용하지 않는다", prompt)
 
-    def test_jump_failure_requires_update_to_fixedupdate_latch(self):
+    def test_jump_failure_requires_rising_edge_latch(self):
         spec = VerificationSpec.from_request("Space 점프를 구현해줘")
         prompt = fix_prompt(spec, ["player_did_not_jump"], {})
-        self.assertIn("spaceKey.isPressed는 Update에서 읽어", prompt)
-        self.assertIn("jumpRequested=true", prompt)
-        self.assertIn("FixedUpdate에서 isGrounded일 때", prompt)
-        self.assertIn("wasPressedThisFrame 전환", prompt)
+        self.assertIn("pressed && !jumpHeld", prompt)
+        self.assertIn("jumpRequested = true", prompt)
+        self.assertIn("jumpHeld = pressed", prompt)
+        self.assertIn("wasPressedThisFrame", prompt)
+
+    def test_excessive_jump_failure_blames_repeated_impulse(self):
+        spec = VerificationSpec.from_request("Space 점프를 구현해줘")
+        prompt = fix_prompt(spec, ["player_jumped_too_high"], {})
+        self.assertIn("impulse", prompt)
+        self.assertIn("pressed && !jumpHeld", prompt)
 
 
 class HostOrchestrationTests(unittest.TestCase):

@@ -8,6 +8,7 @@ the policy.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -49,7 +50,17 @@ _INPUT_SIM_WORDS = (
     "keyboard", "send_key", "키 입력",
 )
 _BEHAVIOUR_WORDS = ("이동", "점프", "move", "movement", "jump")
-_VERIFICATION_WORDS = ("검증", "확인", "실제로", "verify", "test")
+# Only wording that actually asks for proof of runtime behaviour. A bare
+# "확인"/"test" also appears in read-only requests such as
+# "PlayerMovement 스크립트 확인해줘", which must not be forced into a Play Mode
+# input measurement.
+_VERIFICATION_WORDS = ("검증", "verify")
+_VERIFICATION_PHRASES = re.compile(
+    r"실제로\s*\S{0,12}?\s*(?:되는지|동작|작동|움직)|"
+    r"(?:동작|작동|되는지)\s*(?:하는지\s*)?(?:확인|테스트|체크)|"
+    r"actually\s+(?:works?|moves?|jumps?)",
+    re.I,
+)
 _SCENE_MUTATIONS = {
     "unity_create_gameobject", "unity_create_gameobjects", "unity_modify_gameobject",
     "unity_delete_gameobject", "unity_add_component", "unity_remove_component",
@@ -108,13 +119,19 @@ def _compile_error_script_paths(result: str) -> set[str]:
     return paths
 
 
+def _content_digest(content: object) -> str:
+    return hashlib.sha1(str(content or "").encode("utf-8")).hexdigest()
+
+
 def _direct_keyboard_keys(request: str) -> set[str]:
     """Extract explicit keyboard controls that need no PlayerInput wiring."""
     if _ACTION_INPUT_WORKFLOW.search(request):
         return set()
     lowered = request.lower()
     keys: set[str] = set()
-    if re.search(r"(?<![a-z0-9])a\s*[/·]\s*d(?![a-z0-9])", lowered):
+    # Same scheme wording that verification.py's _AD_SCHEME accepts, so the
+    # measured keys and the enforced script keys cannot disagree.
+    if re.search(r"(?<![a-z0-9])(?:a\s*[/,·+]\s*d|d\s*[/,·+]\s*a)(?![a-z0-9])", lowered):
         keys.update({"aKey", "dKey"})
     if re.search(r"(?<![a-z0-9])wasd(?![a-z0-9])", lowered):
         keys.update({"wKey", "aKey", "sKey", "dKey"})
@@ -123,6 +140,212 @@ def _direct_keyboard_keys(request: str) -> set[str]:
     if "방향키" in lowered or "arrow key" in lowered:
         keys.update({"leftArrowKey", "rightArrowKey"})
     return keys
+
+
+def _method_body(content: str, method: str) -> str:
+    """Body of a MonoBehaviour method, delimited by brace depth.
+
+    Scanning to the next member declaration instead would depend on the model's
+    line breaks, and a single-line script would fold FixedUpdate's statements
+    into Update's body.
+    """
+    match = re.search(
+        rf"\b(?:void|bool|float|int|double|Vector2|Vector3)\s+{method}"
+        rf"\s*\([^)]*\)\s*\{{",
+        content,
+    )
+    if not match:
+        return ""
+    depth, start = 1, match.end()
+    for index in range(start, len(content)):
+        if content[index] == "{":
+            depth += 1
+        elif content[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return content[start:index]
+    return content[start:]
+
+
+_LATCH_EXAMPLE = (
+    "void Update() {\n"
+    "    var keyboard = Keyboard.current;\n"
+    "    if (keyboard == null) return;\n"
+    "    bool pressed = keyboard.spaceKey.isPressed;\n"
+    "    if (pressed && !jumpHeld && isGrounded) jumpRequested = true;\n"
+    "    jumpHeld = pressed;\n"
+    "}\n"
+    "void FixedUpdate() {\n"
+    "    if (jumpRequested && isGrounded) {\n"
+    "        rb.AddForce(Vector3.up * jumpForce, ForceMode.Impulse);\n"
+    "        jumpRequested = false;\n"
+    "    }\n"
+    "}"
+)
+_GROUNDING_EXAMPLE = (
+    "// Cast from the collider itself so the check cannot be thrown off by where\n"
+    "// the scene happens to place the player or the floor:\n"
+    "var col = GetComponent<Collider>();\n"
+    "isGrounded = Physics.Raycast(col.bounds.center, Vector3.down,\n"
+    "                             col.bounds.extents.y + 0.15f);\n"
+    "// or detect it from contacts, which needs no geometry at all:\n"
+    "void OnCollisionStay(Collision collision) {\n"
+    "    foreach (ContactPoint contact in collision.contacts)\n"
+    "        if (Vector3.Dot(contact.normal, Vector3.up) > 0.5f) { isGrounded = true; return; }\n"
+    "}\n"
+    "void OnCollisionExit(Collision collision) { isGrounded = false; }\n"
+    "// Rejected: a check decided by an inspector field nothing assigns (an unset\n"
+    "// LayerMask is 0 and matches nothing, an unset Transform is null).\n"
+    "// Do NOT invent a child ground-check point at a guessed offset. A default\n"
+    "// capsule is 2 units tall, so its bottom is at local y = -1; both\n"
+    "// Vector3.down * 0.5f and (-height/2 + radius) land INSIDE the capsule and\n"
+    "// a short ray from there can never reach the floor."
+)
+_GROUND_TAG_EXAMPLE = (
+    "// A scene created this session defines no Ground tag, and CompareTag throws\n"
+    "// at runtime when the tag is undefined. Decide it from the contact normal:\n"
+    "void OnCollisionStay(Collision collision) {\n"
+    "    foreach (ContactPoint contact in collision.contacts)\n"
+    "        if (Vector3.Dot(contact.normal, Vector3.up) > 0.5f) { isGrounded = true; return; }\n"
+    "}\n"
+    "void OnCollisionExit(Collision collision) { isGrounded = false; }"
+)
+_MOVEMENT_EXAMPLE = (
+    "float axis = 0f;\n"
+    "if (keyboard.dKey.isPressed) axis = 1f; else if (keyboard.aKey.isPressed) axis = -1f;\n"
+    "rb.linearVelocity = new Vector3(axis * moveSpeed, rb.linearVelocity.y, 0f);"
+)
+# Concrete code for each gap, keyed by its label. The repair path already hands
+# out code like this and landed a working script on its first attempt, while
+# this gate handed out bare labels and took fourteen. The label says what is
+# missing; only the snippet says what to write.
+_GAP_REMEDIES: dict[str, str] = {
+    "using UnityEngine.InputSystem": "using UnityEngine.InputSystem;",
+    "Keyboard.current": (
+        "var keyboard = Keyboard.current;\nif (keyboard == null) return;"
+    ),
+    "Rigidbody.linearVelocity": _MOVEMENT_EXAMPLE,
+    "Update read of spaceKey.isPressed": _LATCH_EXAMPLE,
+    "Update jumpRequested latch": _LATCH_EXAMPLE,
+    "Update rising-edge guard (pressed && !jumpHeld ... jumpHeld = pressed)": _LATCH_EXAMPLE,
+    "FixedUpdate jumpRequested consumption": _LATCH_EXAMPLE,
+    "self-contained ground check": _GROUNDING_EXAMPLE,
+    'no CompareTag("Ground")': _GROUND_TAG_EXAMPLE,
+    "no legacy UnityEngine.Input API": (
+        "// Replace Input.GetAxis/GetKey/GetButtonDown entirely:\n"
+        + _MOVEMENT_EXAMPLE
+    ),
+}
+_GROUND_QUERIES = r"Raycast|CheckSphere|CheckBox|CheckCapsule|OverlapSphere|SphereCast|BoxCast"
+_INSPECTOR_FIELD = re.compile(
+    r"^[^\S\n]*(?:\[SerializeField\][^\n]*?)?"
+    r"(?:public|private|protected|internal)\s+(LayerMask|Transform)\s+(\w+)\s*(=|;)",
+    re.M,
+)
+
+
+def _grounding_gaps(content: str) -> list[str]:
+    """Reject only ground checks that provably cannot succeed.
+
+    v1.11.9 required the literal `.bounds` or an `OnCollision*` method, which
+    rejected `Physics.Raycast(transform.position, Vector3.down, 1.5f)` — correct,
+    self-contained code — fourteen times in one run and pushed the model into
+    renaming and shrinking the script to escape the gate. The property that
+    actually matters is whether the check depends on inspector state, because
+    nothing in this pipeline assigns it: an unset LayerMask is 0 and matches no
+    layer, an unset Transform is null. Behaviour beyond that is the verification
+    layer's job, not a static gate's.
+    """
+    gaps: list[str] = []
+    has_check = bool(
+        re.search(_GROUND_QUERIES, content, re.I)
+        or "oncollision" in content.lower()
+        or ".bounds" in content.lower()
+    )
+    if not has_check:
+        return ["self-contained ground check"]
+    for match in _INSPECTOR_FIELD.finditer(content):
+        kind, field = match.group(1), match.group(2)
+        if match.group(3) == "=":
+            continue
+        used_by_check = re.search(
+            rf"(?:{_GROUND_QUERIES})[^;]*\b{re.escape(field)}\b", content, re.I
+        ) or re.search(rf"\b{re.escape(field)}\s*\.\s*position", content)
+        if not used_by_check:
+            continue
+        guarded = re.search(
+            rf"\b{re.escape(field)}\s*(?:=(?!=)|[!=]=\s*null|\.value)", content
+        )
+        if guarded:
+            continue
+        gaps.append(
+            f"self-contained ground check ({kind} {field} is never assigned, "
+            "so the check can never succeed)"
+        )
+    return gaps
+
+
+def _frame_body(content: str, method: str, depth: int = 2) -> str:
+    """Code that runs each frame from `method`, including helpers it calls.
+
+    `void Update() { HandleInput(); CheckGrounded(); }` runs the same code as an
+    inline Update and is better structured, but reading only the literal body
+    reports every latch requirement as missing. The property under test is what
+    executes per frame, not which method the statements are typed into.
+    """
+    seen: set[str] = {method}
+    body = _method_body(content, method)
+    collected = [body]
+    frontier = [body]
+    for _ in range(depth):
+        following: list[str] = []
+        for chunk in frontier:
+            for callee in set(re.findall(r"\b([A-Z]\w*)\s*\(\s*\)", chunk)):
+                if callee in seen:
+                    continue
+                seen.add(callee)
+                nested = _method_body(content, callee)
+                if nested:
+                    collected.append(nested)
+                    following.append(nested)
+        if not following:
+            break
+        frontier = following
+    return "\n".join(collected)
+
+
+def _jump_latch_gaps(content: str) -> list[str]:
+    """Require an explicit rising edge around the jump latch.
+
+    Both obvious spellings are wrong here. `wasPressedThisFrame` can have its
+    edge consumed before gameplay Update runs, because the bridge re-queues a
+    held key every editor tick. A bare `isPressed` latch has the opposite
+    problem: it re-arms on every frame the key is down, so FixedUpdate applies
+    one impulse per physics step and the launch velocity stacks. Comparing
+    against the previous frame's state is the only form both agree on.
+    """
+    update_body = _frame_body(content, "Update")
+    fixed_body = _frame_body(content, "FixedUpdate")
+    gaps: list[str] = []
+    if "spaceKey.isPressed" not in update_body:
+        gaps.append("Update read of spaceKey.isPressed")
+    if not re.search(r"\bjumpRequested\s*=\s*true\b", update_body):
+        gaps.append("Update jumpRequested latch")
+    # A rising edge needs a negated flag that Update itself writes back. That
+    # write-back is what separates `!jumpHeld` from an unrelated `!isGrounded`
+    # whose only assignment lives in a collision callback.
+    has_edge = any(
+        candidate != "jumpRequested"
+        and re.search(rf"\b{re.escape(candidate)}\s*=(?!=)", update_body)
+        for candidate in set(re.findall(r"!\s*(\w+)", update_body))
+    )
+    if not has_edge:
+        gaps.append(
+            "Update rising-edge guard (pressed && !jumpHeld ... jumpHeld = pressed)"
+        )
+    if not re.search(r"\bjumpRequested\s*=\s*false\b", fixed_body):
+        gaps.append("FixedUpdate jumpRequested consumption")
+    return gaps
 
 
 @dataclass
@@ -159,6 +382,57 @@ class TaskContract:
     compile_error_scripts: set[str] = field(default_factory=set)
     direct_keyboard_keys: set[str] = field(default_factory=set)
     fresh_scene_requested: bool = False
+    blocked_input_writes: int = 0
+    last_written_content: dict[str, str] = field(default_factory=dict)
+
+    def _input_script_block_message(self, path: str, gaps: list[str]) -> str:
+        """Name every gap, but show code for the ones to fix first.
+
+        A flat list of nine labels tells the model nothing about where to start;
+        that is what turned one unsatisfied check into eight renamed, shrinking
+        scripts. Labels stay complete so the model can see the whole picture,
+        and the two leading gaps carry the exact code that closes them.
+        """
+        required = ", ".join(sorted(self.direct_keyboard_keys))
+        remedies: list[str] = []
+        for gap in gaps:
+            snippet = next(
+                (code for key, code in _GAP_REMEDIES.items() if gap.startswith(key)),
+                None,
+            )
+            if snippet and snippet not in remedies:
+                remedies.append(snippet)
+            if len(remedies) == 2:
+                break
+        # Never print the "fix it with this shape" header with nothing under it.
+        # A gap whose label had no snippet produced exactly that, which is the
+        # bare-label failure this message exists to end.
+        fix_first = ""
+        if remedies:
+            fix_first = (
+                "Fix the first item with exactly this shape:\n"
+                + "\n\n".join(remedies)
+                + "\n"
+            )
+        repeated = ""
+        if self.blocked_input_writes >= 2:
+            repeated = (
+                f"\n\nThis is block #{self.blocked_input_writes} for this request. "
+                "The same policy applies to every player/movement/controller script, "
+                "so renaming the file or simplifying it away will not pass. Fix only "
+                "the first item above, keep everything else identical, and write again."
+            )
+        return (
+            f"Policy blocked event-only input script {path}: this request names simple "
+            f"keyboard controls ({required}), so read Keyboard.current directly and "
+            f"include every requested key.\n"
+            f"Missing: {', '.join(gaps)}.\n"
+            f"{fix_first}"
+            "Do not use the legacy UnityEngine.Input API, and do not create PlayerInput, "
+            "InputActionAsset, generated controls, OnMove/OnJump callback wiring, or a "
+            "separate input handler unless the user explicitly requested that "
+            f"architecture.{repeated}"
+        )
 
     @classmethod
     def from_request(cls, request: str, known_scripts: Iterable[str] = ()) -> "TaskContract":
@@ -167,7 +441,10 @@ class TaskContract:
             any(word in request_lower for word in _INPUT_SIM_WORDS)
             or (
                 any(word in request_lower for word in _BEHAVIOUR_WORDS)
-                and any(word in request_lower for word in _VERIFICATION_WORDS)
+                and (
+                    any(word in request_lower for word in _VERIFICATION_WORDS)
+                    or bool(_VERIFICATION_PHRASES.search(request))
+                )
             )
         )
         return cls(
@@ -225,6 +502,21 @@ class TaskContract:
             args["path"] = path
             if not path.startswith(_SCRIPT_PREFIX) or not path.lower().endswith(".cs"):
                 return args, "Policy blocked script access: scripts must be under Assets/Scripts/ and end in .cs."
+            if (
+                name == "unity_write_script"
+                and self.last_written_content.get(path)
+                == _content_digest(args.get("content"))
+            ):
+                # Rewriting the bytes already on disk changes nothing but costs a
+                # compile cycle and a model turn. One repair loop spent four of
+                # its five writes resending an identical file and then reported
+                # no_verification_progress.
+                return args, (
+                    f"Policy blocked {name} for {path}: this content is byte-identical "
+                    "to what is already on disk, so writing it cannot change the "
+                    "verification result. The reported failure is still present in "
+                    "this exact code — change the implementation before writing again."
+                )
             if name == "unity_write_script" and self.direct_keyboard_keys:
                 filename = path.rsplit("/", 1)[-1].lower()
                 input_behaviour = any(
@@ -232,31 +524,11 @@ class TaskContract:
                     for marker in ("player", "movement", "controller", "input", "character")
                 )
                 if input_behaviour:
+                    # The gate reports what is wrong and lets the model rewrite
+                    # it. Editing the content here would silently make the
+                    # harness the author, so a receipt could no longer say
+                    # whether the local model produced a working script.
                     content = str(args.get("content", ""))
-                    if "spaceKey" in self.direct_keyboard_keys:
-                        # The bridge holds a synthetic key state for several editor
-                        # ticks.  Edge-only reads can be consumed before Update sees
-                        # them, so normalize this mechanically equivalent builder
-                        # mistake before persisting the script.
-                        content = re.sub(
-                            r"(\bspaceKey)\.wasPressedThisFrame\b",
-                            r"\1.isPressed",
-                            content,
-                            flags=re.IGNORECASE,
-                        )
-                        # Fresh scenes do not necessarily define a custom Ground
-                        # tag, and CompareTag throws at runtime when it is absent.
-                        # A simple scene has only the player and its floor, so keep
-                        # the model's collision intent without that project-global
-                        # tag dependency.
-                        content = re.sub(
-                            r"\bcollision\.gameObject\.CompareTag\s*"
-                            r"\(\s*\"Ground\"\s*\)",
-                            "(collision.gameObject != gameObject)",
-                            content,
-                            flags=re.IGNORECASE,
-                        )
-                        args["content"] = content
                     lowered_content = content.lower()
                     missing_keys = sorted(
                         key for key in self.direct_keyboard_keys
@@ -270,60 +542,26 @@ class TaskContract:
                     if "linearvelocity" not in lowered_content:
                         missing_patterns.append("Rigidbody.linearVelocity")
                     if "spaceKey" in self.direct_keyboard_keys:
-                        update_match = re.search(
-                            r"\bvoid\s+Update\s*\([^)]*\)\s*\{",
-                            content,
-                        )
-                        update_tail = content[update_match.end():] if update_match else ""
-                        next_method = re.search(
-                            r"\n\s*(?:public|private|protected|internal)?\s*"
-                            r"(?:void|bool|float|int|Vector\d?|IEnumerator)\s+\w+\s*\(",
-                            update_tail,
-                        )
-                        update_body = (
-                            update_tail[:next_method.start()]
-                            if next_method else update_tail
-                        )
-                        if (
-                            "spaceKey.isPressed" not in update_body
-                            or not re.search(r"\bjumpRequested\s*=\s*true\b", update_body)
+                        missing_patterns.extend(_jump_latch_gaps(content))
+                        if self.fresh_scene_requested and re.search(
+                            r"CompareTag\s*\(\s*\"Ground\"", content, re.I
                         ):
+                            # A scene created in this session defines no custom
+                            # Ground tag, and CompareTag throws at runtime when
+                            # the tag is undefined.
                             missing_patterns.append(
-                                "Update jumpRequested latch for spaceKey.isPressed"
+                                'no CompareTag("Ground") in a scene created this '
+                                "session (use contact.normal instead)"
                             )
-                        if "fixedupdate" not in lowered_content:
-                            missing_patterns.append("FixedUpdate jump consumption")
-                        collision_grounding = (
-                            "oncollision" in lowered_content
-                            and (
-                                (
-                                    re.search(r"\bcontacts?\b", lowered_content)
-                                    and re.search(r"\.normal(?:\.y)?", lowered_content)
-                                )
-                                or re.search(r"\bisgrounded\s*=\s*true\b", lowered_content)
-                            )
-                        )
-                        if ".bounds" not in lowered_content and not collision_grounding:
-                            missing_patterns.append(
-                                "Collider.bounds or Ground collision check"
-                            )
+                        missing_patterns.extend(_grounding_gaps(content))
                     if re.search(r"\b(?:unityengine\.)?input\.", lowered_content):
                         missing_patterns.append("no legacy UnityEngine.Input API")
                     if missing_keys or missing_patterns:
-                        required = ", ".join(sorted(self.direct_keyboard_keys))
-                        details = ", ".join(missing_patterns + missing_keys)
-                        return args, (
-                            f"Policy blocked event-only input script {path}: this request names "
-                            f"simple keyboard controls ({required}). Read Keyboard.current directly "
-                            f"and include every requested key in the behaviour script. Missing: "
-                            f"{details}. Latch a short jump in Update, consume it in FixedUpdate, "
-                            "preserve Y while assigning Rigidbody.linearVelocity, and derive the "
-                            "ground state from Collider.bounds or Ground collision contacts. Do not "
-                            "use the legacy UnityEngine.Input API or create "
-                            "PlayerInput, InputActionAsset, generated controls, OnMove/OnJump "
-                            "callback wiring, or a separate input handler unless the user explicitly "
-                            "requested that architecture."
-                        )
+                        gaps = missing_patterns + [
+                            f"missing key {key}" for key in missing_keys
+                        ]
+                        self.blocked_input_writes += 1
+                        return args, self._input_script_block_message(path, gaps)
             unscoped_existing = path not in self.user_paths | self.session_scripts
             compiler_proven = path in self.compile_error_scripts
             if name == "unity_delete_script" and unscoped_existing and not compiler_proven:
@@ -433,6 +671,7 @@ class TaskContract:
             path = _normalise_path(args.get("path"))
             self.written_scripts.add(path)
             self.session_scripts.add(path)
+            self.last_written_content[path] = _content_digest(args.get("content"))
             self.refreshed_after_write = False
             self.compile_checked = False
         elif name == "unity_delete_script":
