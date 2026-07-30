@@ -4,7 +4,7 @@
 ![alt text](data/0703_unity_mcp1.gif)
 
 
-로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.11**이다.
+로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.12**이다.
 기존 [unity_mcp](../unity_mcp) MCP 서버와 Unity 브리지를 재사용하고
 (v1.7부터 send_key 등 일부 확장), Claude Code의 자리를 로컬 모델이 대신한다.
 
@@ -437,3 +437,15 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           아래가 비어 나가던 문제 — 를 고쳤고, 그 수정이 라이브 실행에서 그대로
           동작하는 것까지 확인했습니다.
           상세: [docs/v1.11.11_reproducibility_and_empty_remedy.md](docs/v1.11.11_reproducibility_and_empty_remedy.md)
+
+- ver 1.11.12 - **다른 요청 형태에서 드러난 결함 셋.** v1.11.11의 9/9는 "A/D 이동 +
+          Space 점프" 프롬프트 하나의 숫자였습니다. 카메라 추종 요청으로 같은 측정을
+          하자 **빌더 자체 완결성이 0/3**으로 무너졌습니다. (1) 빈 씬 템플릿에는 카메라가
+          없어 모든 검사가 측정 전에 차단되고, (2) 미정의 Ground 태그 게이트가 점프 요청
+          안에만 걸려 있어 카메라 요청은 런타임 예외를 냈으며, (3) Play 종료 후 남은
+          런타임 오류를 컴파일 오류로 계산해 실행 하나를 통째로 rollback시켰습니다.
+          콘솔 분류를 실행 상태에서 진단 내용으로 바꾸고, 태그 검사를 씬 조건으로 옮기고,
+          카메라가 필요한 요청의 빈 템플릿을 차단합니다. 재측정에서 카메라 추종이
+          **3/3 `build_stage_success=true`**(이 형태로는 처음), 점프 형태는 회귀 없이
+          11/11입니다.
+          상세: [docs/v1.11.12_request_shape_generalization.md](docs/v1.11.12_request_shape_generalization.md)

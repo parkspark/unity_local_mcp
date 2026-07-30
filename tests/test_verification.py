@@ -316,6 +316,84 @@ class PolicyLintTests(unittest.TestCase):
             self.assertNotIn("fixedZ) + offset", repaired)
 
 
+class ConsoleClassificationTests(unittest.TestCase):
+    """A runtime error left in the console must not become a compile error.
+
+    Classifying by "was Play Mode running when we asked" mislabelled
+    `Tag: Ground is not defined` — thrown from OnCollisionEnter — as two
+    compile errors after Play stopped. `compile_not_ready` then blocked every
+    check and the run rolled back to a worse state.
+    """
+
+    RUNTIME_ENTRY = {
+        "type": "Error",
+        "message": "Tag: Ground is not defined.",
+        "stackTrace": (
+            "UnityEngine.GameObject:CompareTag (string)\n"
+            "PlayerMovement:OnCollisionEnter (UnityEngine.Collision)\n"
+            "UnityEngine.Physics:OnSceneContact (UnityEngine.PhysicsScene,intptr,int)\n"
+        ),
+    }
+    COMPILE_ENTRY = {
+        "type": "Error",
+        "message": "Assets/Scripts/PlayerMovement.cs(21,9): error CS1002: ; expected",
+        "stackTrace": "",
+    }
+
+    def _contract(self):
+        spec = VerificationSpec.from_request("A/D 이동을 구현해줘")
+        return VerificationContract(spec, "")
+
+    def _play_then_stop(self, contract):
+        contract.observe("unity_play_mode", {"action": "play"}, result({"isPlaying": True}))
+        contract.observe("unity_wait", {"seconds": 0.5}, result({"waited_seconds": 0.5}))
+        contract.observe("unity_play_mode", {"action": "stop"}, result({"isPlaying": False}))
+
+    def test_runtime_error_read_after_stop_is_not_a_compile_error(self):
+        contract = self._contract()
+        self._play_then_stop(contract)
+        contract.observe(
+            "unity_read_console",
+            {"types": "error,exception"},
+            result({"entries": [self.RUNTIME_ENTRY]}),
+        )
+        self.assertEqual(contract.compile_error_count, 0)
+        self.assertEqual(contract.compile_errors, [])
+
+    def test_that_runtime_error_is_still_counted_as_a_runtime_failure(self):
+        contract = self._contract()
+        self._play_then_stop(contract)
+        contract.observe(
+            "unity_read_console",
+            {"types": "error,exception"},
+            result({"entries": [self.RUNTIME_ENTRY]}),
+        )
+        self.assertEqual(contract.runtime_error_count, 1)
+
+    def test_real_compiler_diagnostic_is_still_a_compile_error(self):
+        contract = self._contract()
+        contract.observe(
+            "unity_read_console",
+            {"types": "error"},
+            result({"entries": [self.COMPILE_ENTRY]}),
+        )
+        self.assertEqual(contract.compile_error_count, 1)
+
+    def test_mixed_entries_are_split_by_origin(self):
+        contract = self._contract()
+        self._play_then_stop(contract)
+        contract.observe(
+            "unity_read_console",
+            {"types": "error"},
+            result({"entries": [self.RUNTIME_ENTRY, self.COMPILE_ENTRY]}),
+        )
+        self.assertEqual(contract.compile_error_count, 1)
+        self.assertEqual(
+            contract.compile_errors[0]["message"], self.COMPILE_ENTRY["message"]
+        )
+        self.assertEqual(contract.runtime_error_count, 1)
+
+
 class EvidenceTests(unittest.TestCase):
     def test_play_transition_false_before_first_active_is_not_an_unexpected_end(self):
         spec = VerificationSpec.from_request("A/D 이동과 Space 점프를 구현해줘")

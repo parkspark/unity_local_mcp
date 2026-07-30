@@ -134,6 +134,32 @@ def _normalise_path(value: str) -> str:
     return str(value or "").replace("\\", "/").lstrip("/")
 
 
+# A Unity compiler diagnostic always carries a CS code or says the build could
+# not finish. Anything else read while stopped is a leftover from the Play
+# session that just ended, and the console keeps it until the next compile.
+_COMPILER_DIAGNOSTIC = re.compile(
+    r"error CS\d+|\berror CS\b|compiler errors|Build completed with a result of 'Failed'",
+    re.I,
+)
+
+
+def _compile_diagnostics(entries: list) -> list:
+    """Separate real compiler errors from runtime errors left in the console.
+
+    Classifying by "was Play Mode running when we asked" mislabels every
+    runtime error that survives the stop, and a mislabelled entry becomes
+    ``compile_not_ready``, which blocks *every* measurement and can roll a run
+    back to a worse state. A live camera-follow run failed exactly that way:
+    ``Tag: Ground is not defined`` — thrown from ``OnCollisionEnter`` — was
+    counted as two compile errors after Play stopped.
+    """
+    return [
+        entry
+        for entry in entries
+        if _COMPILER_DIAGNOSTIC.search(str((entry or {}).get("message", "")))
+    ]
+
+
 def _compact_entries(entries: list, limit: int = 20) -> list:
     """Keep receipts useful when one runtime error repeats every physics tick."""
     compact: list = []
@@ -522,8 +548,19 @@ class VerificationContract:
                     self.runtime_error_count = len(self.runtime_errors)
                 elif not self.playing:
                     self.compile_checked = True
-                    self.compile_error_count = len(entries)
-                    self.compile_errors = _compact_entries(entries)
+                    diagnostics = _compile_diagnostics(entries)
+                    self.compile_error_count = len(diagnostics)
+                    self.compile_errors = _compact_entries(diagnostics)
+                    # Errors thrown by the Play session that just ended are still
+                    # real failures; they belong to the runtime tally that already
+                    # measured them, not to the compile gate that blocks every
+                    # other check.
+                    leftovers = [e for e in entries if e not in diagnostics]
+                    if leftovers and self.played:
+                        self.runtime_errors = _compact_entries(
+                            self.runtime_errors + leftovers
+                        )
+                        self.runtime_error_count = len(self.runtime_errors)
         elif name == "unity_get_gameobject":
             target = str(args.get("target", "")).strip()
             pos = _position(data)

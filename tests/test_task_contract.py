@@ -493,6 +493,74 @@ class TaskContractTests(unittest.TestCase):
         self.assertIn("OnCollisionStay", error)
         self.assertNotIn("exactly this shape:\n\n", error)
 
+    def test_fresh_scene_without_jump_still_rejects_undefined_ground_tag(self):
+        """The undefined tag belongs to the scene, not to the jump.
+
+        Nested under the jump branch, this check never ran for a camera-follow
+        request, and two of three live runs failed with
+        `Tag: Ground is not defined` thrown from OnCollisionEnter.
+        """
+        contract = TaskContract.from_request(
+            "Assets/Scenes/Fresh.unity에 새 빈 씬을 만들고 A/D 좌우 이동과 "
+            "Main Camera가 Player를 따라오게 구현해줘"
+        )
+        _, error = contract.prepare_call(
+            "unity_write_script",
+            {
+                "path": "Assets/Scripts/PlayerMovement.cs",
+                "content": (
+                    "using UnityEngine.InputSystem;\n"
+                    "class PlayerMovement {\n"
+                    "bool isGrounded; Rigidbody rb;\n"
+                    "void Update() { var k = Keyboard.current; "
+                    "float axis = k.dKey.isPressed ? 1f : (k.aKey.isPressed ? -1f : 0f); "
+                    "rb.linearVelocity = new Vector3(axis * 5f, rb.linearVelocity.y, 0f); }\n"
+                    "void OnCollisionEnter(Collision collision) { "
+                    "if (collision.gameObject.CompareTag(\"Ground\")) "
+                    "{ isGrounded = true; } }\n"
+                    "}"
+                ),
+            },
+        )
+        self.assertIsNotNone(error)
+        self.assertIn('no CompareTag("Ground")', error)
+        self.assertIn("contact.normal", error)
+
+    def test_camera_request_rejects_an_empty_scene_template(self):
+        """An empty scene has no camera, so a camera check can never pass."""
+        contract = TaskContract.from_request(
+            "Assets/Scenes/Fresh.unity에 새 빈 씬을 생성하고 Main Camera가 "
+            "Player를 따라오게 만들어줘"
+        )
+        _, error = contract.prepare_call(
+            "unity_create_scene",
+            {"path": "Assets/Scenes/Fresh.unity", "template": "empty"},
+        )
+        self.assertIsNotNone(error)
+        self.assertIn('template="basic"', error)
+
+    def test_camera_request_accepts_the_basic_template(self):
+        contract = TaskContract.from_request(
+            "Assets/Scenes/Fresh.unity에 새 빈 씬을 생성하고 Main Camera가 "
+            "Player를 따라오게 만들어줘"
+        )
+        _, error = contract.prepare_call(
+            "unity_create_scene",
+            {"path": "Assets/Scenes/Fresh.unity", "template": "basic"},
+        )
+        self.assertIsNone(error)
+
+    def test_request_without_a_camera_may_still_create_an_empty_scene(self):
+        """Only a request that needs a camera pays for the basic template."""
+        contract = TaskContract.from_request(
+            "Assets/Scenes/Fresh.unity에 새 빈 씬을 생성하고 A/D 이동을 구현해줘"
+        )
+        _, error = contract.prepare_call(
+            "unity_create_scene",
+            {"path": "Assets/Scenes/Fresh.unity", "template": "empty"},
+        )
+        self.assertIsNone(error)
+
     def test_block_message_omits_the_code_header_when_no_snippet_applies(self):
         contract = TaskContract.from_request(self.JUMP_REQUEST)
         message = contract._input_script_block_message(

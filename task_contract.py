@@ -382,6 +382,7 @@ class TaskContract:
     compile_error_scripts: set[str] = field(default_factory=set)
     direct_keyboard_keys: set[str] = field(default_factory=set)
     fresh_scene_requested: bool = False
+    camera_requested: bool = False
     blocked_input_writes: int = 0
     last_written_content: dict[str, str] = field(default_factory=dict)
 
@@ -459,6 +460,12 @@ class TaskContract:
                 phrase in request_lower
                 for phrase in ("새 빈 씬", "새 씬", "new empty scene", "new scene")
             ),
+            camera_requested=any(
+                word in request_lower for word in ("카메라", "camera")
+            ) and any(
+                word in request_lower
+                for word in ("추종", "따라", "follow", "following", "스크린샷", "screenshot")
+            ),
         )
 
     @classmethod
@@ -490,6 +497,27 @@ class TaskContract:
                     f"Policy blocked {name}: the user did not request a level/stage, "
                     "LevelLoader, level JSON, or a data-driven level workflow."
                 )
+
+        if (
+            name == "unity_create_scene"
+            and self.camera_requested
+            and str(args.get("template", "empty")).lower() == "empty"
+        ):
+            # "새 빈 씬" describes the gameplay content, not the camera, but the
+            # model reads it as template="empty" and an empty scene has no
+            # camera at all. Three live camera-follow runs all failed their
+            # first verification on `component_missing:Main Camera:Camera`, and
+            # a system-prompt note did not move it — the literal user wording
+            # wins. The argument the model must send is one word, so the block
+            # carries it rather than a description of the problem.
+            return args, (
+                "Policy blocked unity_create_scene with template=\"empty\": this "
+                "request needs a camera, and an empty scene contains no camera and "
+                "no light, so nothing renders and every behaviour check is blocked "
+                "before it runs. Send the same call with template=\"basic\" — that "
+                "provides Main Camera and a light. \"빈 씬\" refers to gameplay "
+                "objects, which template=\"basic\" also leaves empty."
+            )
 
         if name == "unity_list_assets" and "t:script" in str(args.get("filter", "")).lower():
             # Packages can contain thousands of scripts and contaminate a small
@@ -541,18 +569,21 @@ class TaskContract:
                         missing_patterns.append("Keyboard.current")
                     if "linearvelocity" not in lowered_content:
                         missing_patterns.append("Rigidbody.linearVelocity")
+                    # The undefined tag is a property of the scene, not of the
+                    # jump: a fresh scene defines no custom Ground tag and
+                    # CompareTag throws at runtime whoever calls it. Nesting this
+                    # under the jump branch let a camera-follow request ship
+                    # `OnCollisionEnter { CompareTag("Ground") }` and fail live
+                    # with `Tag: Ground is not defined` in two runs of three.
+                    if self.fresh_scene_requested and re.search(
+                        r"CompareTag\s*\(\s*\"Ground\"", content, re.I
+                    ):
+                        missing_patterns.append(
+                            'no CompareTag("Ground") in a scene created this '
+                            "session (use contact.normal instead)"
+                        )
                     if "spaceKey" in self.direct_keyboard_keys:
                         missing_patterns.extend(_jump_latch_gaps(content))
-                        if self.fresh_scene_requested and re.search(
-                            r"CompareTag\s*\(\s*\"Ground\"", content, re.I
-                        ):
-                            # A scene created in this session defines no custom
-                            # Ground tag, and CompareTag throws at runtime when
-                            # the tag is undefined.
-                            missing_patterns.append(
-                                'no CompareTag("Ground") in a scene created this '
-                                "session (use contact.normal instead)"
-                            )
                         missing_patterns.extend(_grounding_gaps(content))
                     if re.search(r"\b(?:unityengine\.)?input\.", lowered_content):
                         missing_patterns.append("no legacy UnityEngine.Input API")
