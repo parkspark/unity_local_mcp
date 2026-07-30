@@ -10,7 +10,7 @@
 ![alt text](data/0703_unity_mcp1.gif)
 
 
-로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.12**이다.
+로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.13**이다.
 기존 [unity_mcp](../unity_mcp) MCP 서버와 Unity 브리지를 재사용하고
 (v1.7부터 send_key 등 일부 확장), Claude Code의 자리를 로컬 모델이 대신한다.
 
@@ -455,3 +455,15 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           **3/3 `build_stage_success=true`**(이 형태로는 처음), 점프 형태는 회귀 없이
           11/11입니다.
           상세: [docs/v1.11.12_request_shape_generalization.md](docs/v1.11.12_request_shape_generalization.md)
+
+- ver 1.11.13 - **공집합 성공의 재발과 프로젝트 가드 구멍.** 아직 측정된 적 없는 세
+          형태(레벨 데이터·부스트·격자 절차 생성)를 측정했습니다. 레벨과 부스트는
+          통과했지만, **격자 요청은 검사 항목이 0개로 추출되어 Play Mode에 들어가지도
+          않고 40초 만에 `verified`가 나왔습니다** — v1.11.2가 잡은 공집합 성공이 그때의
+          가드가 다루지 않는 형태로 되돌아온 것입니다. 가드가 "행동을 말한 요청"만
+          지키고 "증명을 요구한 요청"은 지키지 않아서였고, 이제 만들라고 했고 검증을
+          명시했는데 검사가 없으면 `verification_spec_empty`로 실패합니다. 또 Editor가
+          다른 프로젝트에 열려 있을 때 브리지 호출은 거부되는데 **호스트 파일 도구는
+          그대로 써져** 엉뚱한 프로젝트에 스크립트가 생기던 구멍도 막았습니다.
+          점프 형태는 회귀 없이 통산 13/13입니다.
+          상세: [docs/v1.11.13_empty_spec_and_project_guard.md](docs/v1.11.13_empty_spec_and_project_guard.md)

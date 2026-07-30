@@ -76,6 +76,19 @@ _BEHAVIOUR_HINT_WORDS = (
     "플레이", "play", "동작", "작동", "실행", "물리", "충돌", "collision",
     "gameplay", "runtime",
 )
+# An explicit demand to verify. This is wider than the behaviour words above: a
+# request can ask for proof without naming any behaviour this module knows how
+# to measure. "10x20 격자 보드를 코드로 생성 ... 실제로 생성되는지 검증까지 끝내줘"
+# extracted zero checks and the receipt still said `verified` after 40 seconds
+# without ever entering Play Mode — the empty-set success this project has
+# refused since v1.11.2, reached through a request shape the guard did not cover.
+_VERIFICATION_REQUEST_WORDS = ("검증", "verify", "검사")
+_VERIFICATION_REQUEST_PHRASES = re.compile(
+    r"실제로\s*\S{0,12}?\s*(?:되는지|동작|작동|움직|생성)|"
+    r"(?:되는지|동작|작동)\s*(?:하는지\s*)?(?:확인|테스트|체크)|"
+    r"actually\s+(?:works?|moves?|jumps?|spawns?)",
+    re.I,
+)
 
 MUTATION_TOOLS = {
     "unity_create_gameobject", "unity_create_gameobjects", "unity_modify_gameobject",
@@ -184,6 +197,8 @@ class VerificationSpec:
     # The request used runtime-behaviour language, whether or not a concrete
     # check could be derived from it.
     behaviour_requested: bool = False
+    verification_requested: bool = False
+    build_requested: bool = False
     require_gameplay: bool = False
     require_movement: bool = False
     require_jump: bool = False
@@ -292,6 +307,11 @@ class VerificationSpec:
             asset_paths=assets,
             scene_path=preflight.canonical_scene_path,
             behaviour_requested=_has_word(lower, _BEHAVIOUR_HINT_WORDS),
+            verification_requested=(
+                _has_word(lower, _VERIFICATION_REQUEST_WORDS)
+                or bool(_VERIFICATION_REQUEST_PHRASES.search(request))
+            ),
+            build_requested=_has_word(lower, _BUILD_WORDS),
             require_gameplay=game or level or behaviour,
             require_movement=movement,
             require_jump=jump,
@@ -624,6 +644,17 @@ class VerificationContract:
             self.spec.enabled
             and self.spec.behaviour_requested
             and not self.spec.behaviour_checks()
+        ):
+            failed.append("verification_spec_empty")
+        # The same refusal for a request that asks for proof in words this module
+        # cannot map to any check at all. Without this, "실제로 생성되는지
+        # 검증까지 끝내줘" produced `verified` with an empty measured set: the
+        # host claimed success for something it never looked at.
+        elif (
+            self.spec.enabled
+            and self.spec.build_requested
+            and self.spec.verification_requested
+            and not self.spec.requested_checks()
         ):
             failed.append("verification_spec_empty")
         failed.extend(f"policy_lint:{item}" for item in self.policy_violations)

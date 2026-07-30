@@ -1,7 +1,7 @@
 # AGENTS.md — unity_local_mcp 작업 규칙
 
 로컬 LLM(Ollama `qwen3-coder:30b`)으로 Unity Editor를 제어하는 에이전트 CLI.
-현재 v1.11.12. 이 저장소에서 작업하는 모든 에이전트는 아래 규칙을 따른다.
+현재 v1.11.13. 이 저장소에서 작업하는 모든 에이전트는 아래 규칙을 따른다.
 
 ---
 
@@ -64,15 +64,18 @@ uv run python main.py --prompt-file <파일>
 
 - **Unity Editor가 열려 있어야 한다.** Console에 `[McpBridge] Listening` 확인
 - **Ollama 실행 중** — `ollama serve`, `qwen3-coder:30b` 필요
-- 프로젝트 경로: `--project` 인자 또는 `UNITY_PROJECT_DIR` 환경변수
-  (현재 작업 대상: `C:\Users\park\My project (55)`)
+- 프로젝트 경로: `--project` 인자 또는 `UNITY_PROJECT_DIR` 환경변수.
+  **실행 전 `unity_ping`으로 Editor가 실제로 어느 프로젝트를 열고 있는지 확인하고
+  거기에 맞춘다.** 사용자가 테스트마다 새 프로젝트를 여는 경우가 있고, 불일치 상태로
+  돌리면 브리지 호출이 전부 거부된다(v1.11.13에서 호스트 파일 도구까지 같은 가드를
+  받게 했다).
 
 ---
 
 ## 5. 표준 명령
 
 ```bash
-# 테스트 (현재 189개 통과, subtest 20개 통과)
+# 테스트 (현재 193개 통과, subtest 20개 통과)
 uv run python -m pytest tests/
 
 # 로컬 모델 E2E — 빌더부터 전체
@@ -151,5 +154,6 @@ main.py (CLI) → planner.py (큰 요청 → 마일스톤 분해)
 | v1.11.10 | 정책 게이트 오탐 제거 — 접지 판정을 철자에서 결함 조건으로, 헬퍼 호출 추적, 차단 메시지에 코드 첨부, 무의미한 재작성 차단. **`build_stage_success=true` · `attempts=1` 회복** | [문서](docs/v1.11.10_gate_false_positive.md) |
 | v1.11.11 | **재현성 측정** — 새 씬 E2E **9/9** `build_stage_success=true`(repair 0회, 접지 오탐 0회). 그중 3회는 남은 스크립트를 지우고 시작. 스니펫 없는 항목의 빈 remedy 헤더 제거 | [문서](docs/v1.11.11_reproducibility_and_empty_remedy.md) |
 | v1.11.12 | **요청 형태 일반화** — 카메라 추종 요청에서 빌더 완결성 0/3. 콘솔 분류(런타임→컴파일 오계산), 태그 게이트 범위, 빈 씬 템플릿 차단을 고쳐 **3/3 회복**, 점프 형태 11/11 무회귀 | [문서](docs/v1.11.12_request_shape_generalization.md) |
+| v1.11.13 | **공집합 성공 재발 차단** — 격자 요청이 검사 0개로 `verified`가 되던 것을 `verification_spec_empty`로. 호스트 파일 도구에도 프로젝트 정체성 가드 적용. 레벨·부스트 형태는 통과 확인 | [문서](docs/v1.11.13_empty_spec_and_project_guard.md) |
 
 **현재 진행 상황과 다음 작업**: [docs/HANDOFF_2026-07-29.md](docs/HANDOFF_2026-07-29.md)

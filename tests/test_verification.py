@@ -192,6 +192,47 @@ class BehaviourSpecExtractionTests(unittest.TestCase):
             failures = contract.failures()
         self.assertIn("verification_spec_empty", failures)
 
+    def test_explicit_verification_request_with_no_checks_is_refused(self):
+        """검증을 명시했는데 뽑아낼 검사가 하나도 없으면 성공으로 끝내면 안 된다.
+
+        "10x20 격자 보드를 Awake에서 코드로 생성 ... 실제로 생성되는지 검증까지
+        끝내줘"가 requested_checks=[] 상태로 `verified` 영수증을 남겼다. Play
+        Mode에 들어가지도 않고 40초 만에 통과였다.
+        """
+        spec = VerificationSpec.from_request(
+            "Assets/Scenes/Grid.unity 경로에 새 빈 씬을 생성하고, 10x20 격자 보드를 "
+            "Awake에서 코드로 생성하는 MonoBehaviour를 만들어줘. 보드가 실제로 "
+            "생성되는지 검증까지 끝내줘."
+        )
+        self.assertTrue(spec.verification_requested)
+        self.assertEqual(spec.requested_checks(), [])
+        with tempfile.TemporaryDirectory() as project:
+            scenes = os.path.join(project, "Assets", "Scenes")
+            os.makedirs(scenes)
+            with open(os.path.join(scenes, "Grid.unity"), "w") as handle:
+                handle.write("scene")
+            contract = VerificationContract(spec=spec, project_dir=project)
+            contract.state_seen = True
+            contract.scene_clean = True
+            contract.compile_checked = True
+            contract.scene_path_seen = spec.scene_path
+            failures = contract.failures()
+        self.assertIn("verification_spec_empty", failures)
+
+    def test_edit_without_a_verification_request_stays_unblocked(self):
+        """검증을 요구하지 않은 편집 요청까지 막으면 v1.11.2의 반대 오류가 된다."""
+        spec = VerificationSpec.from_request("Assets/Scripts/Foo.cs의 오타를 수정해줘")
+        self.assertFalse(spec.verification_requested)
+        with tempfile.TemporaryDirectory() as project:
+            os.makedirs(os.path.join(project, "Assets", "Scripts"))
+            with open(os.path.join(project, "Assets", "Scripts", "Foo.cs"), "w") as handle:
+                handle.write("using UnityEngine; public class Foo : MonoBehaviour {}")
+            contract = VerificationContract(spec=spec, project_dir=project)
+            contract.state_seen = True
+            contract.scene_clean = True
+            contract.compile_checked = True
+            self.assertEqual(contract.failures(), [])
+
     def test_check_report_separates_measured_from_skipped(self):
         spec = VerificationSpec.from_request(self.JUMP_FIX_REQUEST)
         with tempfile.TemporaryDirectory() as project:

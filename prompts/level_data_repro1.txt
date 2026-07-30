@@ -1,0 +1,1 @@
+Assets/Scenes/LevelDataRepro1.unity 경로에 새 빈 씬을 생성하고, 데이터 주도 방식으로 레벨을 불러오도록 LevelLoader와 level JSON을 만들어줘. Player(캡슐)가 New Input System으로 A/D 좌우 이동이 되게 하고, 레벨이 실제로 로드되고 이동이 되는지 검증까지 끝내줘.

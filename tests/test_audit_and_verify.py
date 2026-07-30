@@ -135,6 +135,66 @@ class VerifyScriptedAgent(Agent):
         return "verified", []
 
 
+class HostFileToolIdentityTests(unittest.TestCase):
+    """Host file tools must obey the same project guard as bridge mutations.
+
+    The Editor was open on `My project (58)` while the run targeted
+    `My project (55)`: every scene and component call was rejected, but three
+    scripts were still written into (55) — a project nobody was working in.
+    """
+
+    def _tools(self, project_dir, bridge_project):
+        tools = UnityTools.__new__(UnityTools)
+        tools._audit_log = None
+        tools.audit_log_error = None
+        tools.tool_mode = "full"
+        tools.last_raw_result = ""
+        tools._project_dir = project_dir
+        tools._project_identity_verified = False
+        tools._schemas = {}
+
+        async def ping(_name, _args):
+            return json.dumps({
+                "status": "ok",
+                "result": {"projectPath": bridge_project},
+            }, ensure_ascii=False)
+
+        tools._call_once = ping
+        return tools
+
+    def test_write_script_is_refused_when_the_editor_is_on_another_project(self):
+        with tempfile.TemporaryDirectory() as expected, tempfile.TemporaryDirectory() as actual:
+            tools = self._tools(expected, actual)
+            target = os.path.join(expected, "Assets", "Scripts", "Ghost.cs")
+            with mock.patch.object(config, "UNITY_PROJECT_DIR", expected):
+                text = asyncio.run(tools.call("unity_write_script", {
+                    "path": "Assets/Scripts/Ghost.cs",
+                    "content": "public class Ghost {}",
+                }))
+
+            payload = json.loads(text)
+            self.assertEqual(payload["status"], "error")
+            self.assertIn("project mismatch", payload["error"])
+            self.assertFalse(
+                os.path.exists(target),
+                "no file may be written into a project the Editor is not showing",
+            )
+
+    def test_write_script_proceeds_when_the_projects_agree(self):
+        with tempfile.TemporaryDirectory() as project:
+            tools = self._tools(project, project)
+            with mock.patch.object(config, "UNITY_PROJECT_DIR", project):
+                text = asyncio.run(tools.call("unity_write_script", {
+                    "path": "Assets/Scripts/Ghost.cs",
+                    "content": "public class Ghost {}",
+                }))
+
+            self.assertEqual(json.loads(text)["status"], "ok")
+            self.assertTrue(
+                os.path.exists(os.path.join(project, "Assets", "Scripts", "Ghost.cs"))
+            )
+
+
 class VerifyModeTests(unittest.TestCase):
     def test_one_turn_verify_mode_is_forced_and_restored(self):
         tools = ModeTools()

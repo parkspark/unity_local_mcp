@@ -1,0 +1,1 @@
+Assets/Scenes/GridProceduralRepro1.unity 경로에 새 빈 씬을 생성하고, 10x20 격자 보드를 Awake에서 코드로 생성하는 MonoBehaviour를 만들어줘. 카메라가 보드 전체를 담도록 배치하고, 보드가 실제로 생성되는지 검증까지 끝내줘.

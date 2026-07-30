@@ -517,6 +517,29 @@ class UnityTools:
             return text
 
         if name in local_tools.NAMES:
+            # These write straight to disk without going through the bridge, so
+            # the identity guard that protects every bridge mutation never saw
+            # them. With the Editor open on a different project than
+            # --project, scene and component calls were correctly rejected
+            # while three scripts were still written into the project nobody
+            # was working in.
+            identity_error = await self._ensure_project_identity()
+            if identity_error:
+                text = json.dumps(
+                    {
+                        "status": "error",
+                        "error": (
+                            f"{identity_error}. Host file tools write to the "
+                            "--project path, so writing now would put files in a "
+                            "project the Editor is not showing. Open the expected "
+                            "project in Unity, or restart with --project pointing "
+                            "at the open one."
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+                self.last_raw_result = text
+                return _truncate(text)
             project_dir = await self._resolve_project_dir()
             if project_dir is None:
                 text = json.dumps({

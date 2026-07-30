@@ -1,0 +1,1 @@
+Assets/Scenes/BoostDashRepro1.unity 경로에 새 빈 씬을 생성하고, Player(캡슐)와 Player가 서 있을 바닥 플랫폼(큐브)을 만들어줘. New Input System으로 A/D 좌우 이동을 구현하고, D와 LeftShift를 함께 누르면 부스트로 더 빨라지게 해줘. 이동과 부스트가 실제로 되는지 검증까지 끝내줘.
