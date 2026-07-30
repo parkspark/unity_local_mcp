@@ -37,8 +37,9 @@ uv run python main.py --prompt-file <파일>
 
 ## 2. Git 정책
 
-**푸시는 사람만 한다. 자동 푸시 금지.** 커밋도 명시적으로 요청받았을 때만 한다.
-작업 후에는 변경 사항을 보고만 하고 커밋은 사용자에게 맡긴다.
+**커밋과 푸시는 항상 사람이 직접 한다. 에이전트는 요청받아도 하지 않는다.**
+`git commit`도 `git push`도 실행하지 말고, 커밋 단위를 제안하지도 마라. 작업이 끝나면
+변경 파일과 내용만 보고한다. `git status` · `git diff` · `git log` 같은 읽기 명령은 쓴다.
 
 ---
 
@@ -148,6 +149,6 @@ main.py (CLI) → planner.py (큰 요청 → 마일스톤 분해)
 | v1.11.8 | **빌더 자체 완결성** — 첫 호스트 검증 무수정 통과, 직접 키보드 정책·저장 장벽 | [문서](docs/v1.11.8_builder_stage_completeness.md) |
 | v1.11.9 | 점프 상한 검증(`player_jumped_too_high`), rising edge 래치, 정책 게이트의 스크립트 대필 제거. 점프 +19.96 → **+4.98 · 착지 true**. 대가로 `build_stage_success` 후퇴 | [문서](docs/v1.11.9_bounded_jump_and_unrewritten_scripts.md) |
 | v1.11.10 | 정책 게이트 오탐 제거 — 접지 판정을 철자에서 결함 조건으로, 헬퍼 호출 추적, 차단 메시지에 코드 첨부, 무의미한 재작성 차단. **`build_stage_success=true` · `attempts=1` 회복** | [문서](docs/v1.11.10_gate_false_positive.md) |
-| v1.11.11 | **재현성 측정** — 새 씬 E2E 5회 연속 `build_stage_success=true`(repair 0회, 오탐 0회), 변경 후 1회 더해 **6/6**. 스니펫 없는 항목의 빈 remedy 헤더 제거 | [문서](docs/v1.11.11_reproducibility_and_empty_remedy.md) |
+| v1.11.11 | **재현성 측정** — 새 씬 E2E **9/9** `build_stage_success=true`(repair 0회, 접지 오탐 0회). 그중 3회는 남은 스크립트를 지우고 시작. 스니펫 없는 항목의 빈 remedy 헤더 제거 | [문서](docs/v1.11.11_reproducibility_and_empty_remedy.md) |
 
 **현재 진행 상황과 다음 작업**: [docs/HANDOFF_2026-07-29.md](docs/HANDOFF_2026-07-29.md)
