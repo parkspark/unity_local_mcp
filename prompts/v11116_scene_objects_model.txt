@@ -1,0 +1,1 @@
+Assets/Scenes/V11116CatModel.unity 경로에 새 씬을 생성하고, 고양이 모양의 모델링을 생성해줘.

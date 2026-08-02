@@ -205,7 +205,10 @@ class BehaviourSpecExtractionTests(unittest.TestCase):
             "생성되는지 검증까지 끝내줘."
         )
         self.assertTrue(spec.verification_requested)
-        self.assertEqual(spec.requested_checks(), [])
+        # v1.11.16의 scene_objects는 이 요청에도 붙지만, 격자는 Awake에서 런타임에
+        # 만들어지므로 Edit Mode 계층은 그것을 볼 수 없다. 이 검사 하나로 거절이
+        # 풀리면 이 테스트가 지키는 영수증이 그대로 다시 나온다.
+        self.assertEqual(spec.requested_checks(), ["scene_objects"])
         with tempfile.TemporaryDirectory() as project:
             scenes = os.path.join(project, "Assets", "Scenes")
             os.makedirs(scenes)
@@ -540,6 +543,23 @@ class EvidenceTests(unittest.TestCase):
                 "activeScene": {"path": "Assets/Scenes/Game.unity", "isDirty": False},
             }))
             contract.observe("unity_read_console", {"types": "error,exception"}, result({"entries": []}))
+            contract.observe("unity_get_hierarchy", {"max_depth": 3}, result({
+                "scenes": [{
+                    "name": "Game",
+                    "path": "Assets/Scenes/Game.unity",
+                    "rootObjects": [
+                        {"name": "Main Camera", "active": True,
+                         "components": ["Transform", "Camera"]},
+                        {"name": "Directional Light", "active": True,
+                         "components": ["Transform", "Light"]},
+                        {"name": "Player", "active": True,
+                         "components": ["Transform", "MeshFilter", "MeshRenderer",
+                                        "CapsuleCollider", "Rigidbody"]},
+                        {"name": "Ground", "active": True,
+                         "components": ["Transform", "MeshRenderer"]},
+                    ],
+                }],
+            }))
             contract.observe("unity_get_gameobject", {"target": "Player"}, result({
                 "transform": {"position": [0, 1, 0]},
                 "components": [
@@ -594,13 +614,14 @@ class EvidenceTests(unittest.TestCase):
 
 
 class HostTools:
-    def __init__(self, dirty=False):
+    def __init__(self, dirty=False, roots=None):
         self.tool_mode = "full"
         self.ollama_tools = []
         self.modes = []
         self.calls = []
         self.call_modes = []
         self.dirty = dirty
+        self.roots = roots
 
     def set_tool_mode(self, mode):
         self.tool_mode = mode
@@ -616,6 +637,11 @@ class HostTools:
             })
         if name == "unity_read_console":
             return result({"entries": []})
+        if name == "unity_get_hierarchy" and self.roots is not None:
+            return result({"scenes": [{
+                "name": "Test", "path": "Assets/Scenes/Test.unity",
+                "rootObjects": list(self.roots),
+            }]})
         return result({})
 
 
@@ -1450,6 +1476,199 @@ class BuilderCallClassificationTests(unittest.TestCase):
         agent = self._agent()
         agent._classify_builder_call("unity_create_scene", "Policy blocked ...")
         self.assertEqual(agent._builder_call_kinds, {"rejected": 1})
+
+
+def hierarchy(*roots, path="Assets/Scenes/Game.unity"):
+    return result({"scenes": [{"name": "Game", "path": path, "rootObjects": list(roots)}]})
+
+
+def obj(name, *components, active=True, children=None):
+    node = {"name": name, "active": active, "components": list(components)}
+    if children:
+        node["children"] = children
+    return node
+
+
+DEFAULTS = (
+    obj("Main Camera", "Transform", "Camera", "AudioListener"),
+    obj("Directional Light", "Transform", "Light"),
+)
+
+
+class SceneContentTests(unittest.TestCase):
+    """생성 요청이 아무것도 측정하지 않고 통과했다.
+
+    "댕댕이 모양의 모델링 생성해줘"가 requested_checks 0개로 22초 만에 `verified`가
+    났다(영수증 20260801_202621_246_08b6891343). 런타임 어휘도 검증 어휘도 없어
+    v1.11.13과 v1.11.14의 empty-spec 가드를 둘 다 비껴갔고, 호스트는 컴파일 0건과
+    씬 저장만 보고 통과시켰다. 개가 만들어졌는지는 아무도 보지 않았다.
+    """
+
+    def test_a_modeling_request_now_carries_one_measurable_check(self):
+        spec = VerificationSpec.from_request("댕댕이 모양의 모델링 생성해줘")
+        self.assertEqual(spec.requested_checks(), ["scene_objects"])
+
+    def test_default_objects_alone_are_not_something_that_was_created(self):
+        spec = VerificationSpec.from_request("댕댕이 모양의 모델링 생성해줘")
+        contract = VerificationContract(spec=spec, project_dir="")
+        contract.observe("unity_get_hierarchy", {}, hierarchy(*DEFAULTS))
+        self.assertEqual(contract.created_objects(), [])
+        self.assertIn("scene_has_no_created_objects", contract.failures())
+
+    def test_the_objects_that_run_actually_built_are_measured(self):
+        spec = VerificationSpec.from_request("댕댕이 모양의 모델링 생성해줘")
+        contract = VerificationContract(spec=spec, project_dir="")
+        contract.observe("unity_get_hierarchy", {}, hierarchy(
+            *DEFAULTS,
+            obj("DogBody", "Transform", "MeshFilter", "MeshRenderer"),
+            obj("DogHead", "Transform", "MeshFilter", "MeshRenderer"),
+        ))
+        self.assertEqual(contract.created_objects(), ["DogBody", "DogHead"])
+        self.assertNotIn("scene_has_no_created_objects", contract.failures())
+        self.assertIn("scene_objects", contract.measured_checks())
+
+    def test_an_unread_hierarchy_is_a_gap_not_a_pass(self):
+        """계층을 읽지 못했으면 '없다'가 아니라 '재지 못했다'로 끝나야 한다."""
+        spec = VerificationSpec.from_request("댕댕이 모양의 모델링 생성해줘")
+        contract = VerificationContract(spec=spec, project_dir="")
+        self.assertIn("scene_contents_not_observed", contract.failures())
+        self.assertNotIn("scene_objects", contract.measured_checks())
+
+    def test_a_script_only_request_is_not_asked_for_scene_contents(self):
+        """씬에 아무것도 남기지 않는 것이 정상인 요청까지 잡으면 오탐이다."""
+        for request in (
+            "PlayerMovement.cs 스크립트를 만들어줘",
+            "빨간색 머티리얼을 만들어줘",
+            "Assets/Scripts/Foo.cs의 오타를 수정해줘",
+        ):
+            with self.subTest(request=request):
+                spec = VerificationSpec.from_request(request)
+                self.assertFalse(spec.require_scene_objects)
+
+    def test_scene_objects_alone_does_not_lift_the_empty_spec_refusal(self):
+        """v1.11.13의 거절이 이 검사 하나로 풀리면 안 된다.
+
+        격자는 Awake에서 런타임에 생성되므로 Edit Mode 계층은 그것을 볼 수 없다.
+        호스트 오브젝트 하나가 씬에 있다는 사실은 보드가 만들어졌다는 증거가 아니다.
+        """
+        spec = VerificationSpec.from_request(
+            "Assets/Scenes/Grid.unity 경로에 새 빈 씬을 생성하고, 10x20 격자 보드를 "
+            "Awake에서 코드로 생성하는 MonoBehaviour를 만들어줘. 보드가 실제로 "
+            "생성되는지 검증까지 끝내줘."
+        )
+        self.assertEqual(spec.requested_checks(), ["scene_objects"])
+        contract = VerificationContract(spec=spec, project_dir="")
+        contract.observe("unity_get_hierarchy", {}, hierarchy(
+            *DEFAULTS, obj("BoardBuilder", "Transform", "BoardBuilder")
+        ))
+        self.assertIn("verification_spec_empty", contract.failures())
+
+
+class PlayerVisibilityTests(unittest.TestCase):
+    """렌더러 없는 Player에 `verified`가 찍혔다.
+
+    영수증 20260731_033338_195_471258ba7b은 검사 13개를 전부 실측 통과했는데 Game
+    View에 플레이어가 없었다. 그 실행의 계층(세션 20260731_032824_506)에서 Player는
+    Transform·Rigidbody·BoxCollider·PlayerController뿐 — MeshFilter도 MeshRenderer도
+    없는 빈 GameObject였다. 물리는 완벽했으므로 이동·점프·부스트·카메라가 전부
+    통과했고, `components["Player"]`는 Rigidbody와 Collider만 요구했다.
+    """
+
+    def _spec(self):
+        return VerificationSpec.from_request(
+            "A/D로 이동하고 space로 점프하는 플랫포머 게임을 만들어줘"
+        )
+
+    def test_the_check_is_attached_wherever_a_player_is_required(self):
+        spec = self._spec()
+        self.assertTrue(spec.require_visible_player)
+        self.assertIn("player_visible", spec.requested_checks())
+
+    def test_the_recorded_invisible_player_now_fails(self):
+        contract = VerificationContract(spec=self._spec(), project_dir="")
+        contract.observe("unity_get_hierarchy", {}, hierarchy(
+            *DEFAULTS,
+            obj("Player", "Transform", "Rigidbody", "BoxCollider", "PlayerController"),
+        ))
+        self.assertIn("player_has_no_renderer", contract.failures())
+        self.assertIs(contract.evidence()["player_has_renderer"], False)
+
+    def test_a_capsule_player_passes(self):
+        contract = VerificationContract(spec=self._spec(), project_dir="")
+        contract.observe("unity_get_hierarchy", {}, hierarchy(
+            *DEFAULTS,
+            obj("Player", "Transform", "MeshFilter", "MeshRenderer",
+                "CapsuleCollider", "Rigidbody"),
+        ))
+        self.assertNotIn("player_has_no_renderer", contract.failures())
+        self.assertIn("player_visible", contract.measured_checks())
+
+    def test_a_mesh_on_a_child_still_counts_as_visible(self):
+        """몸통과 머리로 나뉜 Player도 화면에는 보인다. 자기 자신만 보면 오탐이다."""
+        contract = VerificationContract(spec=self._spec(), project_dir="")
+        contract.observe("unity_get_hierarchy", {}, hierarchy(
+            *DEFAULTS,
+            obj("Player", "Transform", "Rigidbody", "CapsuleCollider",
+                children=[obj("Body", "Transform", "MeshFilter", "SkinnedMeshRenderer")]),
+        ))
+        self.assertNotIn("player_has_no_renderer", contract.failures())
+
+    def test_a_missing_player_is_reported_as_unmeasured(self):
+        contract = VerificationContract(spec=self._spec(), project_dir="")
+        contract.observe("unity_get_hierarchy", {}, hierarchy(*DEFAULTS))
+        failures = contract.failures()
+        self.assertIn("player_visibility_not_measured", failures)
+        self.assertNotIn("player_has_no_renderer", failures)
+
+    def test_the_repair_prompt_names_the_missing_mesh_not_the_physics(self):
+        prompt = fix_prompt(self._spec(), ["player_has_no_renderer"], {})
+        self.assertIn("MeshRenderer", prompt)
+        self.assertIn("프리미티브", prompt)
+
+    def test_both_new_checks_are_static_so_the_play_mode_guard_keeps_its_meaning(self):
+        """Edit Mode로 끝나는 검사가 Play Mode 증명으로 계산되면 안 된다."""
+        spec = self._spec()
+        self.assertNotIn("scene_objects", spec.behaviour_checks())
+        self.assertNotIn("player_visible", spec.behaviour_checks())
+
+
+class SceneContentOrchestrationTests(unittest.TestCase):
+    """검사가 spec에만 있고 호스트가 계층을 읽지 않으면 영원히 미측정으로 끝난다."""
+
+    def _run(self, request, roots):
+        with tempfile.TemporaryDirectory() as receipts:
+            tools = HostTools(roots=roots)
+            shown = []
+            agent = NoModelAgent(
+                tools, shown.append, lambda *_: None, shown.append,
+                enable_logging=False, enable_verification=True,
+            )
+            with mock.patch.object(config, "VERIFICATION_RECEIPT_DIR", receipts):
+                success = asyncio.run(agent.run_turn(request, tool_mode="verify"))
+            with open(agent.last_verification_receipt_path, encoding="utf-8") as handle:
+                receipt = json.load(handle)
+            return success, [name for name, _ in tools.calls], receipt
+
+    def test_a_creation_request_makes_the_host_read_the_hierarchy(self):
+        success, calls, receipt = self._run(
+            "댕댕이 모양의 모델링 생성해줘",
+            [obj("Main Camera", "Transform", "Camera"),
+             obj("Dog", "Transform", "MeshFilter", "MeshRenderer")],
+        )
+        self.assertIn("unity_get_hierarchy", calls)
+        self.assertEqual(receipt["measured_checks"], ["scene_objects"])
+        self.assertEqual(receipt["evidence"]["scene_objects"], ["Dog"])
+        self.assertTrue(success)
+
+    def test_an_empty_scene_is_no_longer_verified(self):
+        """이 요청이 22초 만에 measured_checks 0개로 통과했던 자리다."""
+        success, _, receipt = self._run(
+            "댕댕이 모양의 모델링 생성해줘",
+            [obj("Main Camera", "Transform", "Camera"),
+             obj("Directional Light", "Transform", "Light")],
+        )
+        self.assertFalse(success)
+        self.assertIn("scene_has_no_created_objects", receipt["failures"])
 
 
 class HostOrchestrationTests(unittest.TestCase):

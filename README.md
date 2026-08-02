@@ -10,7 +10,7 @@
 ![alt text](data/0703_unity_mcp1.gif)
 
 
-로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.15**이다.
+로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.16**이다.
 기존 [unity_mcp](../unity_mcp) MCP 서버와 Unity 브리지를 재사용하고
 (v1.7부터 send_key 등 일부 확장), Claude Code의 자리를 로컬 모델이 대신한다.
 
@@ -499,3 +499,19 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           기록된 28건의 분포(정상 1.0~6.6배, 고장 53~60배)를 근거로 10배 상한을
           넣었습니다.
           상세: [docs/v1.11.15_camera_observation_and_boost_cap.md](docs/v1.11.15_camera_observation_and_boost_cap.md)
+
+- ver 1.11.16 - **만들어졌는지 보지 않고 통과하던 두 자리.** "댕댕이 모양의 모델링
+          생성해줘"가 **검사 0개로 22초 만에 `verified`**가 났습니다. 런타임 어휘도
+          검증 어휘도 없어 기존 두 가드를 모두 비껴갔고, 호스트는 컴파일 0건과 씬
+          저장만 보고 통과시켰습니다 — 개가 만들어졌는지는 아무도 보지 않았습니다.
+          이제 씬에 실체가 남아야 하는 생성 요청은 Edit Mode 계층을 읽어 기본
+          오브젝트 외에 무엇이 생겼는지 재고 영수증에 이름으로 남깁니다
+          (`scene_objects`). 같은 계열로, **렌더러 없는 Player가 검사 13개를 전부
+          실측 통과한 적**이 있습니다(물리는 완벽했고 화면만 비어 있었습니다).
+          `components["Player"]`가 Rigidbody와 Collider만 요구했기 때문인데, 이제
+          Player 또는 그 자식에 Renderer가 있는지 봅니다(`player_visible`). 기록된
+          계층 판독 73세션을 재생해 오탐 0건, 적발은 그 한 건뿐이었습니다. 라이브
+          E2E 2회는 **repair 없이 1사이클 통과** — 모델링 요청은 37.3초에
+          `measured_checks`가 `[]`에서 실측 1건(고양이 부위 8개)으로 바뀌었고,
+          게임 요청은 77.2초에 검사 8개를 전부 실측했습니다.
+          상세: [docs/v1.11.16_scene_content_and_player_visibility.md](docs/v1.11.16_scene_content_and_player_visibility.md)

@@ -21,3 +21,6 @@ docs/HANDOFF_*.md
 .gemini/
 .idea/
 .vscode/
+
+# 로컬 문서
+local_docs/

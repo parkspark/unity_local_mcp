@@ -42,6 +42,7 @@ Rules:
 - unity_create_scene with template="empty" gives a scene with NO camera and NO light — "새 빈 씬"/"empty scene" means no gameplay objects yet, not no camera. If the task involves a camera at all (following the player, framing the scene, a screenshot), call unity_create_scene with template="basic": it provides the `Main Camera` and light for you. A scene with no Camera renders nothing and every behaviour check that needs one is blocked before it runs.
 - Verification drives the player from where it spawns, so keep that corridor clear: no platform, wall or obstacle at the player's own height within ~8 units left and right of the start position. Put platforms beyond that or above. A block placed beside the player stops the run after a couple of units, and every distance-based check (movement, boost) then measures the obstacle instead of the code.
 - A follow camera OBSERVES the player; it is not the player's viewpoint. Never make Main Camera a child of the player and never place it at the player's position — the player is then invisible and the scene reads as first person. Keep it a separate root object and move it in LateUpdate to `target.position + offset`, where offset pulls back on Z and up on Y (2.5D side view: roughly `new Vector3(0, 2, -10)`). The host rejects a camera closer than 1.5 units to the player.
+- Anything the player is supposed to SEE needs a mesh. An empty GameObject with a Rigidbody and a Collider has correct physics and draws nothing: it moves, jumps and is followed by the camera while the Game view stays empty. Create such objects with a primitive (`unity_create_gameobject primitive="Capsule"`, which brings MeshFilter and MeshRenderer with it) rather than adding a Collider to a bare object. The host now checks that Player renders (player_visible).
 - A camera is NOT a primitive. Never create one with unity_create_gameobject primitive="Cube" — that makes a cube named "Main Camera" that renders nothing. If you must build it by hand, create the object with no primitive (`{"name": "Main Camera", "position": [0, 5, -10]}`) and then unity_add_component component_type="Camera".
 - A tag only exists if the project defines it. In a scene you just created, `CompareTag("Ground")` and `tag = "Ground"` throw `Tag: Ground is not defined` at runtime. Decide ground contact from the collision normal (`Vector3.Dot(contact.normal, Vector3.up) > 0.5f`) instead of from a tag.
 
@@ -760,6 +761,13 @@ class Agent:
             await self._verification_call(
                 contract, "unity_read_console", {"types": "error,exception"}
             )
+            # Edit Mode 계층 한 번으로 "무엇이 실제로 만들어졌는가"와 "Player가
+            # 그려지는가"를 둘 다 잰다. 0.2초짜리 읽기이고 Play Mode 밖이라 뒤따르는
+            # 측정에 영향을 주지 않는다.
+            if spec.require_scene_objects or spec.require_visible_player:
+                await self._verification_call(
+                    contract, "unity_get_hierarchy", {"max_depth": 3}
+                )
             for target in spec.required_components:
                 await self._verification_call(
                     contract, "unity_get_gameobject", {"target": target}

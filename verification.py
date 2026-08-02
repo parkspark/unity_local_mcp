@@ -106,6 +106,27 @@ _BEHAVIOUR_HINT_WORDS = (
     "플레이", "play", "동작", "작동", "실행", "물리", "충돌", "collision",
     "gameplay", "runtime",
 )
+# 씬에 실체가 남아야 하는 생성 요청. "댕댕이 모양의 모델링 생성해줘"는 런타임 어휘도
+# 검증 어휘도 없어 두 empty-spec 가드를 모두 비껴갔고, requested_checks 0개로
+# `verified`가 나갔다(영수증 20260801_202621_246_08b6891343). 컴파일 0건과 씬 저장만
+# 보고 통과시킨 것이라, 개가 만들어졌는지는 아무도 보지 않았다. 이 두 어휘가 겹치면
+# 호스트가 계층을 읽어 실제로 오브젝트가 생겼는지 잰다(scene_objects).
+_CREATE_WORDS = (
+    "만들", "생성", "제작", "구현", "배치", "추가", "세우",
+    "create", "make", "build", "spawn", "place", "add",
+)
+_SCENE_OBJECT_WORDS = (
+    "오브젝트", "게임오브젝트", "모델링", "모델", "캐릭터", "프리팹",
+    "큐브", "정육면체", "구체", "캡슐", "평면", "바닥", "지형", "맵",
+    "스테이지", "레벨", "씬", "장면", "플레이어", "블록", "발판", "플랫폼",
+    "object", "gameobject", "model", "modeling", "character", "prefab",
+    "cube", "sphere", "capsule", "plane", "terrain", "scene", "player",
+    "block", "platform",
+)
+# 새 씬이 기본으로 갖는 오브젝트. 이것만 남아 있으면 아무것도 만들어지지 않았다.
+_DEFAULT_SCENE_OBJECTS = frozenset({
+    "main camera", "directional light", "global volume",
+})
 # An explicit demand to verify. This is wider than the behaviour words above: a
 # request can ask for proof without naming any behaviour this module knows how
 # to measure. "10x20 격자 보드를 코드로 생성 ... 실제로 생성되는지 검증까지 끝내줘"
@@ -326,6 +347,13 @@ class VerificationSpec:
     require_idle_stability: bool = False
     require_jump_landing: bool = False
     require_left_boost: bool = False
+    # 생성 요청이 씬에 남긴 결과를 재는 검사. 계층에 기본 오브젝트 말고 무엇이라도
+    # 있어야 한다.
+    require_scene_objects: bool = False
+    # 렌더러 없는 Player가 verified로 나간 적이 있다(영수증 20260731_033338_195).
+    # Rigidbody와 Collider만 요구하면 물리는 완벽히 동작하고 이동·점프·부스트·카메라가
+    # 전부 실측 통과하는데 화면에는 아무것도 그려지지 않는다.
+    require_visible_player: bool = False
     idle_duration: float = 0.5
     idle_max_delta_x: float = 0.05
     movement_duration: float = 1.0
@@ -410,6 +438,13 @@ class VerificationSpec:
         # Any extracted behaviour condition implies Play Mode: a check that is
         # never run must never count as passed.
         behaviour = movement or jump or camera or boost
+        build = _has_word(lower, _BUILD_WORDS)
+        # 생성 동사 하나만으로는 부족하다 — "스크립트를 만들어줘"는 씬에 아무것도
+        # 남기지 않는 것이 정상이다. 씬에 실체로 존재해야 하는 대상을 함께 말했을
+        # 때만 계층을 잰다.
+        scene_objects = build and _has_word(lower, _CREATE_WORDS) and (
+            _has_word(lower, _SCENE_OBJECT_WORDS) or game or level or behaviour
+        )
         if _AD_SCHEME.search(request):
             right_key, left_key, keys_explicit = "d", "a", True
         elif _ARROW_SCHEME.search(request):
@@ -422,7 +457,7 @@ class VerificationSpec:
         )
         return cls(
             request=preflight.normalized_request,
-            enabled=force or _has_word(lower, _BUILD_WORDS),
+            enabled=force or build,
             asset_paths=assets,
             scene_path=preflight.canonical_scene_path,
             behaviour_requested=_has_word(lower, _BEHAVIOUR_HINT_WORDS),
@@ -430,7 +465,10 @@ class VerificationSpec:
                 _has_word(lower, _VERIFICATION_REQUEST_WORDS)
                 or bool(_VERIFICATION_REQUEST_PHRASES.search(request))
             ),
-            build_requested=_has_word(lower, _BUILD_WORDS),
+            build_requested=build,
+            require_scene_objects=scene_objects,
+            # Player 컴포넌트를 요구하는 요청은 그 Player가 화면에 보여야 한다.
+            require_visible_player="Player" in components,
             require_gameplay=game or level or behaviour,
             require_movement=movement,
             require_jump=jump,
@@ -469,6 +507,8 @@ class VerificationSpec:
     # (name, is-requested) — evaluated in a fixed order so receipts diff cleanly.
     def requested_checks(self) -> list[str]:
         flags = [
+            ("scene_objects", self.require_scene_objects),
+            ("player_visible", self.require_visible_player),
             ("gameplay", self.require_gameplay),
             ("movement", self.require_movement),
             ("bidirectional", self.require_bidirectional),
@@ -490,7 +530,12 @@ class VerificationSpec:
 
     def behaviour_checks(self) -> list[str]:
         """Requested checks that need an actual Play Mode measurement."""
-        static = {"components", "level_marker", "screenshot"}
+        # scene_objects·player_visible는 Edit Mode 계층 조회로 끝난다. Play Mode
+        # 증명을 요구하는 목록에 넣으면 빈 spec 가드의 뜻이 무너진다.
+        static = {
+            "components", "level_marker", "screenshot",
+            "scene_objects", "player_visible",
+        }
         return [
             name for name in self.requested_checks()
             if name.split(":")[0] not in static
@@ -506,6 +551,13 @@ class VerificationSpec:
             "unity_get_state: 활성 씬이 저장됐고(isDirty=false) Play Mode가 아님",
             "unity_read_console types=error,exception: 컴파일 오류 0건",
         ]
+        if self.require_scene_objects:
+            checks.append(
+                "unity_get_hierarchy: 활성 씬에 기본 오브젝트(Main Camera, "
+                "Directional Light) 외의 오브젝트가 실제로 존재"
+            )
+        if self.require_visible_player:
+            checks.append("Player 또는 그 자식에 Renderer가 있어 화면에 그려짐")
         for target, components in self.required_components.items():
             checks.append(f"{target} 컴포넌트 포함: {', '.join(components)}")
         if self.require_gameplay:
@@ -575,6 +627,8 @@ class VerificationContract:
     runtime_errors: list = field(default_factory=list)
     runtime_error_count: int = 0
     level_marker_seen: bool = False
+    hierarchy_seen: bool = False
+    scene_roots: list = field(default_factory=list)
     observed_components: dict[str, list[str]] = field(default_factory=dict)
     observed_component_data: dict[str, dict[str, dict]] = field(default_factory=dict)
     latest_positions: dict[str, tuple[float, float, float]] = field(default_factory=dict)
@@ -706,6 +760,24 @@ class VerificationContract:
                             self.runtime_errors + leftovers
                         )
                         self.runtime_error_count = len(self.runtime_errors)
+        elif name == "unity_get_hierarchy":
+            scenes = data.get("scenes") if isinstance(data.get("scenes"), list) else []
+            wanted = self.spec.scene_path or self.scene_path_seen
+            chosen = next(
+                (
+                    scene for scene in scenes
+                    if isinstance(scene, dict)
+                    and wanted
+                    and _normalise_path(str(scene.get("path", ""))) == wanted
+                ),
+                None,
+            )
+            if chosen is None:
+                chosen = next((s for s in scenes if isinstance(s, dict)), None)
+            if chosen is not None:
+                roots = chosen.get("rootObjects")
+                self.scene_roots = roots if isinstance(roots, list) else []
+                self.hierarchy_seen = True
         elif name == "unity_get_gameobject":
             target = str(args.get("target", "")).strip()
             pos = _position(data)
@@ -760,6 +832,64 @@ class VerificationContract:
         return any(item.lower() == required or item.lower().endswith("." + required)
                    for item in observed)
 
+    def created_objects(self) -> list[str]:
+        """Active root objects a new scene does not come with on its own."""
+        return [
+            str(node.get("name", ""))
+            for node in self.scene_roots
+            if isinstance(node, dict)
+            and node.get("active", True)
+            and str(node.get("name", "")).strip().lower() not in _DEFAULT_SCENE_OBJECTS
+        ]
+
+    def _find_node(self, name: str) -> dict | None:
+        """Locate one object anywhere in the observed hierarchy."""
+        wanted = name.strip().lower()
+        stack = [node for node in self.scene_roots if isinstance(node, dict)]
+        while stack:
+            node = stack.pop()
+            if str(node.get("name", "")).strip().lower() == wanted:
+                return node
+            children = node.get("children")
+            if isinstance(children, list):
+                stack.extend(item for item in children if isinstance(item, dict))
+        return None
+
+    @classmethod
+    def _subtree_has_renderer(cls, node: dict) -> bool:
+        """Whether this object or any descendant draws something.
+
+        The mesh may legitimately sit on a child — a Player made of a body and a
+        head is still visible. Requiring the renderer on the object itself would
+        fail that structure for no reason.
+        """
+        components = node.get("components")
+        if isinstance(components, list) and any(
+            str(item).lower().split(".")[-1].endswith("renderer")
+            for item in components
+        ):
+            return True
+        children = node.get("children")
+        return isinstance(children, list) and any(
+            cls._subtree_has_renderer(item)
+            for item in children if isinstance(item, dict)
+        )
+
+    def _player_renderer_seen(self) -> bool | None:
+        """True/False when a Player was observed, None when it never was."""
+        node = self._find_node("Player")
+        if node is not None:
+            return self._subtree_has_renderer(node)
+        observed = self.observed_components.get("Player")
+        if observed:
+            # unity_get_gameobject lists only the object's own components, so a
+            # child mesh is invisible here. Used only when no hierarchy read
+            # happened at all.
+            return any(
+                item.lower().split(".")[-1].endswith("renderer") for item in observed
+            )
+        return None
+
     def _camera_player_gap(self, label: str | None) -> float | None:
         """Distance between the camera and the player when a motion started.
 
@@ -795,7 +925,15 @@ class VerificationContract:
             self.spec.enabled
             and self.spec.build_requested
             and self.spec.verification_requested
-            and not self.spec.requested_checks()
+            # scene_objects는 이 거절을 혼자 취소하지 못한다. 그 검사는 Edit Mode
+            # 계층만 보므로 "10x20 격자를 Awake에서 코드로 생성"처럼 런타임에
+            # 만들어지는 것에 대해서는 아무 말도 하지 않는다. 호스트 오브젝트 하나가
+            # 씬에 있다는 이유로 v1.11.13이 세운 거절이 풀리면, 이 가드가 막으려던
+            # 바로 그 영수증이 다시 나온다.
+            and not [
+                name for name in self.spec.requested_checks()
+                if name != "scene_objects"
+            ]
         ):
             failed.append("verification_spec_empty")
         failed.extend(f"policy_lint:{item}" for item in self.policy_violations)
@@ -817,6 +955,17 @@ class VerificationContract:
             failed.append("compile_not_checked")
         elif self.compile_error_count:
             failed.append(f"compile_errors:{self.compile_error_count}")
+        if self.spec.require_scene_objects:
+            if not self.hierarchy_seen:
+                failed.append("scene_contents_not_observed")
+            elif not self.created_objects():
+                failed.append("scene_has_no_created_objects")
+        if self.spec.require_visible_player:
+            renderer = self._player_renderer_seen()
+            if renderer is None:
+                failed.append("player_visibility_not_measured")
+            elif not renderer:
+                failed.append("player_has_no_renderer")
         for target, required in self.spec.required_components.items():
             observed = self.observed_components.get(target, [])
             for component in required:
@@ -1032,6 +1181,8 @@ class VerificationContract:
             )
 
         measured = {
+            "scene_objects": self.hierarchy_seen,
+            "player_visible": self._player_renderer_seen() is not None,
             "gameplay": self.played and self.waited and self.runtime_checked,
             "movement": pair(self.motion_before, self.motion_after, "rightArrow")
                         or (self.movement_before is not None
@@ -1097,6 +1248,8 @@ class VerificationContract:
                 "unique_errors": self.runtime_errors,
                 "level_loaded_marker": self.level_marker_seen,
             },
+            "scene_objects": self.created_objects() if self.hierarchy_seen else None,
+            "player_has_renderer": self._player_renderer_seen(),
             "components": self.observed_components,
             "component_data": self.observed_component_data,
             "player_movement_delta": delta(self.movement_before, self.movement_after),
@@ -1144,6 +1297,10 @@ class VerificationContract:
 # ("a check that was blocked before is finally being measured, and it fails").
 # Order matters: longer prefixes must precede the shorter ones they extend.
 _FAILURE_CHECK_PREFIXES = (
+    ("scene_has_no_created_objects", "scene_objects"),
+    ("scene_contents_not_observed", "scene_objects"),
+    ("player_has_no_renderer", "player_visible"),
+    ("player_visibility_not_measured", "player_visible"),
     ("player_did_not_land", "jump_landing"),
     ("player_did_not_jump", "jump"),
     ("player_jumped_too_high", "jump"),
@@ -1250,6 +1407,23 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
                 "FreezePositionZ | FreezeRotationX | FreezeRotationY | "
                 "FreezeRotationZ로 설정한다(정수 비트값 120). 기존 필수 비트를 "
                 "단일 값으로 덮어쓰지 않는다."
+            )
+        if failure == "scene_has_no_created_objects":
+            lint_guidance.append(
+                "- scene_has_no_created_objects: 활성 씬에 기본 오브젝트(Main Camera, "
+                "Directional Light) 말고는 아무것도 없다. 스크립트만 쓰고 씬에 "
+                "배치하지 않았거나, 다른 씬에 만들었거나, 저장 전에 씬을 바꿨을 수 "
+                "있다. unity_create_gameobject로 요청한 오브젝트를 활성 씬에 만들고 "
+                "unity_save_scene까지 한 뒤 unity_get_hierarchy로 확인한다."
+            )
+        if failure == "player_has_no_renderer":
+            lint_guidance.append(
+                "- player_has_no_renderer: Player에 Rigidbody와 Collider만 있고 "
+                "그릴 메시가 없어 화면에 보이지 않는다. 물리는 정상이므로 이동·점프 "
+                "측정은 통과하지만 게임으로는 성립하지 않는다. Player를 Capsule 등 "
+                "프리미티브로 다시 만들거나(MeshFilter + MeshRenderer가 함께 붙는다) "
+                "기존 오브젝트에 MeshFilter와 MeshRenderer를 추가한다. 빈 "
+                "GameObject에 Collider만 붙이지 않는다."
             )
         if "camera_target_null" in failure:
             lint_guidance.append(
