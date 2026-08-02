@@ -273,6 +273,8 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
 | `winmodal.py` | "Script Updating Consent" 모달 자동 클릭 유틸 |
 | `main.py` | REPL, 슬래시 명령, 스크린샷 처리 |
 | `project_settings.py` | CLI·환경변수·최근 기록을 이용한 Unity 프로젝트 선택 및 경로 검증 |
+| `docs/STATUS.md` | **지금 열려 있는 결함·과제의 단일 출처.** 갱신하며 쓴다 |
+| `docs/vX.Y.Z_*.md` | 버전별 불변 증거 기록 (배경·변경·검증). 현재 상태가 아님 |
 | `mcp_server.log` | MCP 서버 stderr 진단 로그. 사용자 요청 실행 기록은 아님 |
 | `logs/runs/YYYY/MM/DD/` | 요청별 실행 트랜스크립트 (`.log` + `.jsonl`, Git 제외) |
 | `logs/mcp/YYYY/MM/DD/` | 모든 `UnityTools.call()` 감사 로그 (`.jsonl`, Git 제외) |
@@ -280,6 +282,11 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
 
 
 ## 버전별 개선 사항
+
+> **지금 무엇이 열려 있는지**는 [docs/STATUS.md](docs/STATUS.md)에서 읽는다.
+> 아래 히스토리와 `docs/vX.Y.Z_*.md`는 그때 무엇을 왜 고쳤고 무엇을 실측했는지의
+> 기록이지, 현재 상태가 아니다.
+
 - ver 1.0 - 프로토타입 MVP
 
 - ver 1.1 - C# 스크립트 작성 도구 (unity_write_script/unity_read_script), 컴파일 자동 대기,
