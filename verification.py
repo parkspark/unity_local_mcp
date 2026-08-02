@@ -160,7 +160,13 @@ _REQUIREMENT_MARKERS = re.compile(
     r"획득|점수|스코어|score|체력|hp|목숨|life|lives|데미지|damage|"
     r"사라지|없어지|제거되|파괴되|destroy|despawn|"
     r"클리어|clear|게임\s*오버|game\s*over|승리|패배|"
-    r"소환|스폰|spawn|생성하는|개\s*생성|격자|보드|grid|board|"
+    # `보드`는 "키보드" 안에서, `board`는 "Keyboard.current" 안에서 걸린다.
+    # 구현 지시문("키보드 null 체크")이 요구 조항으로 잡혀 있었다.
+    r"소환|스폰|spawn|생성하는|개\s*생성|격자|(?<!키)보드|grid|(?<!key)board|"
+    # 낙사 복귀. "떨어지면 시작 위치로 되돌아오게"는 조건 표현이 있는데도 결과
+    # 어휘(되돌아·복귀·리스폰)가 목록에 없어 조용히 빠졌다. policy_lint의
+    # fall_respawn_check_missing은 "낙사 시 시작 위치로 복귀" 리터럴에만 걸린다.
+    r"되돌아|복귀|리스폰|respawn|시작\s*위치로|"
     # 구조·개수 요구. "3층짜리 플랫폼을 만들어"는 조건 표현이 없어 놓쳤는데,
     # 층수가 맞는지 보는 검사는 어휘에 없다.
     r"\d+\s*(?:층|개|칸|줄|단)(?:짜리|의)?|층짜리|multi[- ]?level|"
@@ -200,12 +206,18 @@ def _unmapped_requirements(request: str, checks: Iterable[str]) -> list[str]:
             clause = " ".join(raw.split())
             if len(clause) < 6 or not _REQUIREMENT_MARKERS.search(clause):
                 continue
-            # A clause the existing vocabulary already speaks for is not
-            # unmapped: "부스트로 더 빨라지게" is measured, so is "카메라가
-            # 따라오게". With no behaviour check at all, nothing vouches for
-            # anything.
-            if behaviour and _has_word(clause.lower(), _COVERED_CONCEPT_WORDS):
-                continue
+            # 여기에 "이 절이 쓰는 어휘를 이미 측정하니 넘어간다"는 거부권이
+            # 있었다. 근거로 적힌 예("부스트로 더 빨라지게", "카메라가 따라오게")는
+            # _REQUIREMENT_MARKERS에 애초에 걸리지 않는다 — 순수 이동 문구는 마커가
+            # 이미 거른다. 아무도 지나지 않는 문을 지키면서, 같은 낱말이 플레이어가
+            # 아닌 대상을 가리키는 절을 묵살했다.
+            #
+            #   "적을 만들어 좌우로 자동 순찰하게 해줘"   ← `좌우`가 덮었다고 판단
+            #   "이동과 점수 획득이 되는지 검증해줘"      ← `이동`이 덮었다고 판단
+            #
+            # 코퍼스 전체에서 묵살된 5개 절 중 3개가 이런 실제 공백이었고, 나머지
+            # 2개는 위 `보드`/`board` 오탐이 우연히 상쇄된 것이었다. 양쪽을 함께
+            # 고치면 거부권은 남길 이유가 없다.
             clause = clause[:120]
             if clause not in seen:
                 seen.add(clause)

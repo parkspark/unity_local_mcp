@@ -286,6 +286,46 @@ class BehaviourSpecExtractionTests(unittest.TestCase):
         )
         self.assertEqual(spec.unmapped_requirements(), [])
 
+    def test_a_non_player_subject_does_not_borrow_the_player_s_coverage(self):
+        """플레이어가 아닌 대상이 이동 어휘를 쓰면 묵살되고 있었다.
+
+        "적을 만들어 좌우로 자동 순찰하게 해줘"는 `좌우`가 _COVERED_CONCEPT_WORDS에
+        있다는 이유로 미매핑에서 빠졌다. 순찰을 재는 검사는 어휘에 없으므로 이
+        요청의 핵심은 아무도 보지 않는데 영수증의 ⚠ 줄도 비어 있었다.
+        """
+        spec = VerificationSpec.from_request(
+            "Assets/Scenes/P.unity 경로에 새 씬을 생성하고, Player(캡슐)를 만들어 "
+            "A/D 좌우 이동을 구현해줘. 적(빨간 캡슐)을 하나 만들어 좌우로 자동 "
+            "순찰하게 해줘."
+        )
+        self.assertIn("순찰", " ".join(spec.unmapped_requirements()))
+
+    def test_fall_respawn_wording_is_recorded(self):
+        """policy_lint는 "낙사 시 시작 위치로 복귀" 리터럴에만 걸린다.
+
+        "떨어지면 시작 위치로 되돌아오게"는 조건 표현이 있는데도 결과 어휘가
+        마커에 없어 어느 계층에서도 잡히지 않았다.
+        """
+        spec = VerificationSpec.from_request(
+            "Assets/Scenes/R.unity 경로에 새 씬을 생성하고, Player와 바닥을 만들어 "
+            "A/D 이동을 구현해줘. 바닥 아래로 떨어지면 Player가 시작 위치로 "
+            "되돌아오게 해줘."
+        )
+        self.assertIn("되돌아", " ".join(spec.unmapped_requirements()))
+
+    def test_keyboard_is_not_a_board(self):
+        """`보드`가 "키보드" 안에서, `board`가 "Keyboard.current" 안에서 걸렸다.
+
+        구현 지시문이 요구 조항으로 잡혔고, 그 오탐이 위 거부권의 오탐과 우연히
+        상쇄되며 두 결함을 함께 가리고 있었다.
+        """
+        spec = VerificationSpec.from_request(
+            "Assets/Scenes/K.unity 경로에 새 씬을 생성하고 Player가 A/D로 "
+            "이동하게 구현해줘. New Input System의 Keyboard.current만 사용하고 "
+            "키보드 null 체크를 넣어라. 이동이 실제로 되는지 검증해줘."
+        )
+        self.assertEqual(spec.unmapped_requirements(), [])
+
     def test_receipt_records_unmapped_requirements(self):
         spec = VerificationSpec.from_request(
             "Assets/Scenes/A.unity에 새 씬을 만들고 Player가 A/D로 이동하고 "
