@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Iterable
@@ -247,6 +248,50 @@ _GAP_REMEDIES: dict[str, str] = {
         + _MOVEMENT_EXAMPLE
     ),
 }
+# 항목을 하나씩 주는 방식이 수렴하지 않을 때 통째로 주는 형태. 이 게이트를 통과한
+# 스크립트들이 실제로 갖는 모양이고, 모든 gap 라벨을 동시에 만족한다.
+_FULL_INPUT_SCRIPT_SHAPE = (
+    "using UnityEngine;\n"
+    "using UnityEngine.InputSystem;\n"
+    "\n"
+    "public class {CLASS} : MonoBehaviour {\n"
+    "    public float moveSpeed = 7f;\n"
+    "    public float jumpForce = 10f;\n"
+    "    Rigidbody rb;\n"
+    "    bool isGrounded, jumpHeld, jumpRequested;\n"
+    "\n"
+    "    void Awake() { rb = GetComponent<Rigidbody>(); }\n"
+    "\n"
+    "    void Update() {\n"
+    "        var keyboard = Keyboard.current;\n"
+    "        if (keyboard == null) return;\n"
+    "        float axis = 0f;\n"
+    "        if (keyboard.dKey.isPressed) axis = 1f;\n"
+    "        else if (keyboard.aKey.isPressed) axis = -1f;\n"
+    "        rb.linearVelocity = new Vector3(axis * moveSpeed, rb.linearVelocity.y, 0f);\n"
+    "        bool pressed = keyboard.spaceKey.isPressed;\n"
+    "        if (pressed && !jumpHeld && isGrounded) jumpRequested = true;\n"
+    "        jumpHeld = pressed;\n"
+    "    }\n"
+    "\n"
+    "    void FixedUpdate() {\n"
+    "        if (jumpRequested && isGrounded) {\n"
+    "            rb.AddForce(Vector3.up * jumpForce, ForceMode.Impulse);\n"
+    "            jumpRequested = false;\n"
+    "        }\n"
+    "    }\n"
+    "\n"
+    "    void OnCollisionStay(Collision collision) {\n"
+    "        foreach (ContactPoint contact in collision.contacts)\n"
+    "            if (Vector3.Dot(contact.normal, Vector3.up) > 0.5f) { isGrounded = true; return; }\n"
+    "    }\n"
+    "\n"
+    "    void OnCollisionExit(Collision collision) { isGrounded = false; }\n"
+    "}"
+)
+# 실측 분포: 차단이 2회 이상 반복된 실행 18개 중 대부분이 2~4회에 수렴했고,
+# 수렴하지 않은 것은 18회까지 갔다. 정상 수렴 구간을 지난 뒤에 개입한다.
+_FULL_SHAPE_AFTER_BLOCKS = 4
 _GROUND_QUERIES = r"Raycast|CheckSphere|CheckBox|CheckCapsule|OverlapSphere|SphereCast|BoxCast"
 _INSPECTOR_FIELD = re.compile(
     r"^[^\S\n]*(?:\[SerializeField\][^\n]*?)?"
@@ -426,13 +471,34 @@ class TaskContract:
                 + "\n\n".join(remedies)
                 + "\n"
             )
+        # 이 문장이 2번째 차단부터 붙어 있었는데, 첫 차단에서 모델이 스크립트를
+        # 통째로 다시 쓰면서 멀쩡하던 부분을 깨뜨린다. 2026-08-02 실행에서 1차
+        # 차단(gap 3개)을 고치다 점프 로직이 사라져 2차 차단은 gap 5개로 늘었고,
+        # 3차에 가서야 1개로 줄었다. 보존 지시는 첫 차단부터 있어야 한다.
+        keep = (
+            "\n\nFix only the first item above, keep everything else in the file "
+            "identical, and write again."
+        )
         repeated = ""
         if self.blocked_input_writes >= 2:
             repeated = (
                 f"\n\nThis is block #{self.blocked_input_writes} for this request. "
                 "The same policy applies to every player/movement/controller script, "
-                "so renaming the file or simplifying it away will not pass. Fix only "
-                "the first item above, keep everything else identical, and write again."
+                "so renaming the file or simplifying it away will not pass."
+            )
+        # 같은 게이트가 계속 걸리면 항목을 하나씩 주는 방식이 수렴하지 않는다.
+        # 실측 최악은 18회 연속 차단으로 30회 예산의 60%를 태웠고, gap 수가
+        # 11↔9로 진동했다(20260730_142849). 그 단계에서는 부분이 아니라 전체
+        # 형태를 준다.
+        if self.blocked_input_writes >= _FULL_SHAPE_AFTER_BLOCKS:
+            # 클래스명은 파일명과 같아야 컴파일된다. 하드코딩한 이름을 그대로
+            # 쓰게 하면 이 게이트를 통과시키고 컴파일에서 떨어뜨리게 된다.
+            class_name = os.path.splitext(os.path.basename(path))[0] or "PlayerMovement"
+            repeated += (
+                "\n\nPartial fixes are not converging. Rebuild the file on this "
+                "shape, keeping any extra behaviour the request asked for (fall "
+                "respawn, idle stop) as additional members:\n"
+                + _FULL_INPUT_SCRIPT_SHAPE.replace("{CLASS}", class_name)
             )
         return (
             f"Policy blocked event-only input script {path}: this request names simple "
@@ -443,7 +509,7 @@ class TaskContract:
             "Do not use the legacy UnityEngine.Input API, and do not create PlayerInput, "
             "InputActionAsset, generated controls, OnMove/OnJump callback wiring, or a "
             "separate input handler unless the user explicitly requested that "
-            f"architecture.{repeated}"
+            f"architecture.{keep}{repeated}"
         )
 
     @classmethod

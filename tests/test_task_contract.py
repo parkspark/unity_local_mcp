@@ -3,7 +3,7 @@ import unittest
 from unittest import mock
 
 import config
-from task_contract import TaskContract
+from task_contract import TaskContract, _FULL_INPUT_SCRIPT_SHAPE
 from verification import VerificationSpec
 from agent import _screenshot_path
 
@@ -501,6 +501,48 @@ class TaskContractTests(unittest.TestCase):
         _, error = self._write("// no ground check at all", contract)
         self.assertIn("renaming the file", error)
         self.assertIn("block #3", error)
+
+    def test_the_first_block_already_says_to_keep_the_rest_of_the_file(self):
+        """보존 지시가 2번째 차단부터 붙어 첫 차단에서 멀쩡한 코드가 날아갔다.
+
+        2026-08-02 실행에서 1차 차단(gap 3개)을 고치다 점프 로직이 통째로
+        사라져 2차 차단의 gap이 5개로 늘었고, 3차에 가서야 1개로 줄었다.
+        차단 3회 중 2회가 이 회귀 때문에 쓰였다.
+        """
+        _, error = self._write("// no ground check at all")
+        self.assertIn("keep everything else in the file identical", error)
+        self.assertNotIn("block #", error)
+
+    def test_a_non_converging_sequence_gets_the_whole_shape(self):
+        """항목을 하나씩 주는 방식이 수렴하지 않은 실측 최악은 18회 차단이었다.
+
+        gap 수가 11↔9로 진동하며 30회 예산의 60%를 태웠다
+        (20260730_142849). 정상 수렴 구간(2~4회)을 지나면 전체 형태를 준다.
+        """
+        contract = TaskContract.from_request(self.JUMP_REQUEST)
+        for _ in range(3):
+            _, error = self._write("// no ground check at all", contract)
+            self.assertNotIn("Rebuild the file on this shape", error)
+        _, error = self._write("// no ground check at all", contract)
+        self.assertIn("Rebuild the file on this shape", error)
+        self.assertIn("void FixedUpdate()", error)
+
+    def test_the_whole_shape_passes_the_gate_it_is_handed_out_by(self):
+        """통과하지 못하는 모범답안을 주면 차단을 한 번 더 늘릴 뿐이다."""
+        contract = TaskContract.from_request(self.JUMP_REQUEST)
+        code = _FULL_INPUT_SCRIPT_SHAPE.replace("{CLASS}", "PlayerMovement")
+        _, violation = contract.prepare_call(
+            "unity_write_script",
+            {"path": "Assets/Scripts/PlayerMovement.cs", "content": code},
+        )
+        self.assertIsNone(violation)
+
+    def test_the_whole_shape_uses_the_file_s_own_class_name(self):
+        """클래스명이 파일명과 다르면 게이트를 통과하고 컴파일에서 떨어진다."""
+        contract = TaskContract.from_request(self.JUMP_REQUEST)
+        for _ in range(4):
+            _, error = self._write("// no ground check at all", contract)
+        self.assertIn("public class PlayerMovement : MonoBehaviour", error)
 
     def test_fresh_scene_jump_rejects_undefined_ground_tag(self):
         contract = TaskContract.from_request(
