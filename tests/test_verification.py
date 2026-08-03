@@ -286,19 +286,31 @@ class BehaviourSpecExtractionTests(unittest.TestCase):
         )
         self.assertEqual(spec.unmapped_requirements(), [])
 
-    def test_a_non_player_subject_does_not_borrow_the_player_s_coverage(self):
-        """플레이어가 아닌 대상이 이동 어휘를 쓰면 묵살되고 있었다.
+    def test_measured_vocabulary_does_not_vouch_for_an_unmeasured_clause(self):
+        """이동 어휘가 같은 절의 측정되지 않는 부분까지 보증하고 있었다.
 
-        "적을 만들어 좌우로 자동 순찰하게 해줘"는 `좌우`가 _COVERED_CONCEPT_WORDS에
-        있다는 이유로 미매핑에서 빠졌다. 순찰을 재는 검사는 어휘에 없으므로 이
-        요청의 핵심은 아무도 보지 않는데 영수증의 ⚠ 줄도 비어 있었다.
+        "이동과 점수 획득이 되는지 검증해줘"는 `이동`이 측정되는 어휘라는 이유로
+        미매핑에서 빠졌다. 점수를 재는 검사는 어휘에 없으므로 요청의 절반은
+        아무도 보지 않는데 영수증의 ⚠ 줄은 비어 있었다.
+
+        거부권을 낱말 가족이 아니라 **검사 이름**에 묶는 것이 이 결함의 교정이다
+        (`_CHECK_COVERAGE`). 점수를 덮는 검사는 아직 없으므로 계속 보고된다.
         """
+        spec = VerificationSpec.from_request(
+            "Assets/Scenes/S.unity 경로에 새 씬을 생성하고, Player가 A/D로 "
+            "이동하게 구현해줘. 이동과 점수 획득이 실제로 되는지 검증까지 끝내줘."
+        )
+        self.assertIn("점수", " ".join(spec.unmapped_requirements()))
+
+    def test_a_clause_the_new_check_covers_stops_being_reported(self):
+        """재는데도 계속 경고하면 ⚠ 줄 전체가 무시당한다."""
         spec = VerificationSpec.from_request(
             "Assets/Scenes/P.unity 경로에 새 씬을 생성하고, Player(캡슐)를 만들어 "
             "A/D 좌우 이동을 구현해줘. 적(빨간 캡슐)을 하나 만들어 좌우로 자동 "
             "순찰하게 해줘."
         )
-        self.assertIn("순찰", " ".join(spec.unmapped_requirements()))
+        self.assertIn("autonomous_motion", spec.requested_checks())
+        self.assertEqual(spec.unmapped_requirements(), [])
 
     def test_fall_respawn_wording_is_recorded(self):
         """policy_lint는 "낙사 시 시작 위치로 복귀" 리터럴에만 걸린다.
@@ -1602,6 +1614,83 @@ class SceneContentTests(unittest.TestCase):
             *DEFAULTS, obj("BoardBuilder", "Transform", "BoardBuilder")
         ))
         self.assertIn("verification_spec_empty", contract.failures())
+
+
+class AutonomousMotionTests(unittest.TestCase):
+    """스스로 움직여야 하는 것이 움직이는지 보는 검사가 없었다.
+
+    2026-08-03 실행에서 "적을 좌우로 자동 순찰하게"가 65초에 `verified`로 나갔다.
+    검사 7개를 전부 실측했지만 전부 플레이어 이동 축이었고, 적이 움직이는지는
+    아무도 보지 않았다. 유일한 신호는 영수증의 ⚠ 미매핑 줄뿐이었다.
+    """
+
+    def _spec(self):
+        return VerificationSpec.from_request(
+            "Assets/Scenes/P.unity 경로에 새 씬을 생성하고, Player(캡슐)와 바닥을 "
+            "만들어 A/D 이동을 구현해줘. 적(빨간 캡슐)을 하나 만들어 좌우로 자동 "
+            "순찰하게 해줘."
+        )
+
+    def _contract(self, before, after):
+        contract = VerificationContract(spec=self._spec(), project_dir="")
+        contract.observe("unity_get_hierarchy", {}, hierarchy(
+            *DEFAULTS,
+            obj("Player", "Transform", "MeshRenderer", "Rigidbody", "CapsuleCollider"),
+            obj("GroundPlatform", "Transform", "MeshRenderer"),
+            obj("Enemy", "Transform", "MeshRenderer", "EnemyPatrol"),
+        ))
+        contract.autonomous_before.update(before)
+        contract.autonomous_after.update(after)
+        return contract
+
+    def test_the_check_is_attached_to_a_patrol_request(self):
+        spec = self._spec()
+        self.assertTrue(spec.require_autonomous_motion)
+        self.assertIn("autonomous_motion", spec.requested_checks())
+
+    def test_it_needs_play_mode_so_it_is_not_a_static_check(self):
+        """Edit Mode로 끝나는 검사로 분류되면 빈 spec 가드가 무너진다."""
+        self.assertIn("autonomous_motion", self._spec().behaviour_checks())
+
+    def test_the_player_is_not_a_candidate(self):
+        """호스트가 입력으로 직접 미는 대상은 '스스로' 움직인 것이 아니다."""
+        contract = self._contract({}, {})
+        self.assertNotIn("Player", contract.autonomous_candidates())
+        self.assertIn("Enemy", contract.autonomous_candidates())
+
+    def test_a_standing_still_enemy_fails(self):
+        contract = self._contract(
+            {"Enemy": (3.0, 1.0, 0.0), "GroundPlatform": (0.0, 0.0, 0.0)},
+            {"Enemy": (3.0, 1.0, 0.0), "GroundPlatform": (0.0, 0.0, 0.0)},
+        )
+        self.assertIn("no_object_moved_on_its_own", contract.failures())
+
+    def test_a_patrolling_enemy_passes_and_is_named_in_the_receipt(self):
+        contract = self._contract(
+            {"Enemy": (3.0, 1.0, 0.0), "GroundPlatform": (0.0, 0.0, 0.0)},
+            {"Enemy": (4.6, 1.0, 0.0), "GroundPlatform": (0.0, 0.0, 0.0)},
+        )
+        self.assertNotIn("no_object_moved_on_its_own", contract.failures())
+        self.assertIn("autonomous_motion", contract.measured_checks())
+        evidence = contract.evidence()["autonomous_motion"]
+        self.assertEqual(evidence["object"], "Enemy")
+        self.assertAlmostEqual(evidence["distance"], 1.6, places=3)
+
+    def test_an_unsampled_scene_is_a_gap_not_a_pass(self):
+        contract = self._contract({}, {})
+        self.assertIn("autonomous_motion_not_measured", contract.failures())
+        self.assertNotIn("autonomous_motion", contract.measured_checks())
+
+    def test_a_plain_movement_request_does_not_get_the_check(self):
+        """플레이어만 움직이는 요청에 붙으면 통과하던 형태가 전부 떨어진다."""
+        spec = VerificationSpec.from_request(
+            "A/D 좌우 이동과 Space 점프가 되는 플랫포머를 만들어줘"
+        )
+        self.assertFalse(spec.require_autonomous_motion)
+
+    def test_the_repair_prompt_points_at_the_unattached_component(self):
+        prompt = fix_prompt(self._spec(), ["no_object_moved_on_its_own"], {})
+        self.assertIn("add_component", prompt)
 
 
 class PlayerVisibilityTests(unittest.TestCase):

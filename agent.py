@@ -45,6 +45,8 @@ Rules:
 - Anything the player is supposed to SEE needs a mesh. An empty GameObject with a Rigidbody and a Collider has correct physics and draws nothing: it moves, jumps and is followed by the camera while the Game view stays empty. Create such objects with a primitive (`unity_create_gameobject primitive="Capsule"`, which brings MeshFilter and MeshRenderer with it) rather than adding a Collider to a bare object. The host now checks that Player renders (player_visible).
 - A camera is NOT a primitive. Never create one with unity_create_gameobject primitive="Cube" — that makes a cube named "Main Camera" that renders nothing. If you must build it by hand, create the object with no primitive (`{"name": "Main Camera", "position": [0, 5, -10]}`) and then unity_add_component component_type="Camera".
 - A tag only exists if the project defines it. In a scene you just created, `CompareTag("Ground")` and `tag = "Ground"` throw `Tag: Ground is not defined` at runtime. Decide ground contact from the collision normal (`Vector3.Dot(contact.normal, Vector3.up) > 0.5f`) instead of from a tag.
+- To tell WHICH object you touched (a coin, an enemy, a goal), use a marker component, never a tag. Write a one-line `public class Coin : MonoBehaviour {}`, add it to those objects with unity_add_component, and test with `if (other.GetComponent<Coin>() != null)`. This needs no project tag, cannot throw at runtime, and survives renaming. The collision normal only tells you the direction of a hit, not the identity of what was hit.
+- An object that must move on its own (a patrolling enemy, a moving platform) needs BOTH the script and the component actually attached to that object. Writing PatrolX.cs and never calling unity_add_component on the enemy leaves it standing still; the host measures this with no input given.
 
 Writing C# scripts:
 - New behaviour script: unity_write_script → unity_refresh_assets (the host waits for compilation) → unity_read_console types="error" → if no errors, unity_add_component with the class name.
@@ -823,6 +825,30 @@ class Agent:
                     elif contract.idle_after[1] < contract.idle_before[1] - 2:
                         for stage in ("movement", "jump", "boost", "camera"):
                             contract.block(stage, "player_fell_during_spawn_check")
+                if spec.require_autonomous_motion and await confirm_play_active():
+                    # 입력을 주기 전에 잰다. 이동 측정이 시작되면 물리와 충돌로
+                    # 다른 오브젝트도 밀려나므로, 스스로 움직인 것인지 밀린 것인지
+                    # 구분할 수 없게 된다.
+                    targets = contract.autonomous_candidates()
+                    for target in targets:
+                        await self._verification_call(
+                            contract, "unity_get_gameobject", {"target": target}
+                        )
+                        pos = contract.latest_positions.get(target.lower())
+                        if pos is not None:
+                            contract.autonomous_before[target] = pos
+                    if contract.autonomous_before:
+                        await self._verification_call(
+                            contract, "unity_wait",
+                            {"seconds": spec.autonomous_duration},
+                        )
+                        for target in list(contract.autonomous_before):
+                            await self._verification_call(
+                                contract, "unity_get_gameobject", {"target": target}
+                            )
+                            pos = contract.latest_positions.get(target.lower())
+                            if pos is not None:
+                                contract.autonomous_after[target] = pos
                 if spec.require_movement and not (
                     spec.require_bidirectional and spec.move_right_key == "d"
                 ):

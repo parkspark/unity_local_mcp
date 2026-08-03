@@ -123,6 +123,14 @@ _SCENE_OBJECT_WORDS = (
     "cube", "sphere", "capsule", "plane", "terrain", "scene", "player",
     "block", "platform",
 )
+# 스스로 움직이는 것을 요구하는 문구. 순찰하는 적, 자동으로 도는 발판처럼 입력 없이
+# 움직여야 하는 대상이다. 2026-08-03 실행에서 "적을 좌우로 자동 순찰하게"가
+# `verified`로 나갔고 — EnemyPatrol.cs는 실제로 만들어졌지만 — 그것이 움직이는지
+# 본 검사는 하나도 없었다(영수증 20260803_002929 계열).
+_AUTONOMOUS_WORDS = (
+    "순찰", "patrol", "자동으로 움직", "자동 이동", "스스로 움직", "혼자 움직",
+    "왔다갔다", "왔다 갔다", "자동으로 좌우", "자동 순찰",
+)
 # 새 씬이 기본으로 갖는 오브젝트. 이것만 남아 있으면 아무것도 만들어지지 않았다.
 _DEFAULT_SCENE_OBJECTS = frozenset({
     "main camera", "directional light", "global volume",
@@ -188,6 +196,19 @@ _CLAUSE_SPLIT = re.compile(r"하고\s+|해서\s+|그리고\s+|,\s*|\s+및\s+|면
 _ASSET_TOKEN = re.compile(r"\bAssets/\S+", re.I)
 
 
+# 검사가 실제로 덮는 문구. 제거된 거부권과 다른 점은 **어휘 가족이 아니라 검사
+# 이름에 묶인다**는 것이다 — `좌우`가 이동 어휘라는 이유로 적의 순찰을 묵살하던
+# 것이 그 결함이었다. 여기서는 `autonomous_motion`이 켜졌을 때만, 그 검사가 재는
+# 문구만 지운다. 지운 뒤에도 마커가 남으면 그 절은 여전히 미매핑이다.
+_CHECK_COVERAGE: dict[str, re.Pattern] = {
+    "autonomous_motion": re.compile(
+        r"순찰|patrol|자동\s*으?로?\s*움직|자동\s*이동|스스로\s*움직|혼자\s*움직|"
+        r"왔다\s*갔다|자동\s*순찰",
+        re.I,
+    ),
+}
+
+
 def _unmapped_requirements(request: str, checks: Iterable[str]) -> list[str]:
     """Name request clauses that no requested check will ever measure.
 
@@ -205,6 +226,15 @@ def _unmapped_requirements(request: str, checks: Iterable[str]) -> list[str]:
         for raw in _CLAUSE_SPLIT.split(sentence):
             clause = " ".join(raw.split())
             if len(clause) < 6 or not _REQUIREMENT_MARKERS.search(clause):
+                continue
+            # 켜져 있는 검사가 덮는 문구를 지운 뒤 다시 본다. 남는 마커가 없으면
+            # 그 절은 측정되고 있는 것이므로 ⚠로 띄우지 않는다 — 재는데도 계속
+            # 경고하면 이 줄 전체가 무시당한다.
+            probe = clause
+            for name, pattern in _CHECK_COVERAGE.items():
+                if name in checks:
+                    probe = pattern.sub(" ", probe)
+            if not _REQUIREMENT_MARKERS.search(probe):
                 continue
             # 여기에 "이 절이 쓰는 어휘를 이미 측정하니 넘어간다"는 거부권이
             # 있었다. 근거로 적힌 예("부스트로 더 빨라지게", "카메라가 따라오게")는
@@ -362,6 +392,10 @@ class VerificationSpec:
     # 생성 요청이 씬에 남긴 결과를 재는 검사. 계층에 기본 오브젝트 말고 무엇이라도
     # 있어야 한다.
     require_scene_objects: bool = False
+    # 입력 없이 스스로 움직여야 하는 대상이 실제로 움직이는지.
+    require_autonomous_motion: bool = False
+    autonomous_duration: float = 0.8
+    autonomous_min_distance: float = 0.15
     # 렌더러 없는 Player가 verified로 나간 적이 있다(영수증 20260731_033338_195).
     # Rigidbody와 Collider만 요구하면 물리는 완벽히 동작하고 이동·점프·부스트·카메라가
     # 전부 실측 통과하는데 화면에는 아무것도 그려지지 않는다.
@@ -478,6 +512,7 @@ class VerificationSpec:
                 or bool(_VERIFICATION_REQUEST_PHRASES.search(request))
             ),
             build_requested=build,
+            require_autonomous_motion=_has_word(lower, _AUTONOMOUS_WORDS),
             require_scene_objects=scene_objects,
             # Player 컴포넌트를 요구하는 요청은 그 Player가 화면에 보여야 한다.
             require_visible_player="Player" in components,
@@ -522,6 +557,7 @@ class VerificationSpec:
             ("scene_objects", self.require_scene_objects),
             ("player_visible", self.require_visible_player),
             ("gameplay", self.require_gameplay),
+            ("autonomous_motion", self.require_autonomous_motion),
             ("movement", self.require_movement),
             ("bidirectional", self.require_bidirectional),
             ("idle_stability", self.require_idle_stability),
@@ -570,6 +606,11 @@ class VerificationSpec:
             )
         if self.require_visible_player:
             checks.append("Player 또는 그 자식에 Renderer가 있어 화면에 그려짐")
+        if self.require_autonomous_motion:
+            checks.append(
+                f"입력을 주지 않은 {self.autonomous_duration}초 동안 Player가 아닌 "
+                f"오브젝트 하나가 {self.autonomous_min_distance} 이상 스스로 이동"
+            )
         for target, components in self.required_components.items():
             checks.append(f"{target} 컴포넌트 포함: {', '.join(components)}")
         if self.require_gameplay:
@@ -641,6 +682,9 @@ class VerificationContract:
     level_marker_seen: bool = False
     hierarchy_seen: bool = False
     scene_roots: list = field(default_factory=list)
+    # Play Mode에서 입력 없이 잰 비-Player 오브젝트의 전/후 위치.
+    autonomous_before: dict[str, tuple[float, float, float]] = field(default_factory=dict)
+    autonomous_after: dict[str, tuple[float, float, float]] = field(default_factory=dict)
     observed_components: dict[str, list[str]] = field(default_factory=dict)
     observed_component_data: dict[str, dict[str, dict]] = field(default_factory=dict)
     latest_positions: dict[str, tuple[float, float, float]] = field(default_factory=dict)
@@ -854,6 +898,31 @@ class VerificationContract:
             and str(node.get("name", "")).strip().lower() not in _DEFAULT_SCENE_OBJECTS
         ]
 
+    def autonomous_candidates(self, limit: int = 6) -> list[str]:
+        """Objects that could be the thing moving on its own.
+
+        Named from the observed hierarchy rather than a naming convention: the
+        request says "적", the model may call it Enemy, Patroller or Monster.
+        Player is excluded because the host drives it with input; the ground and
+        the platform stay in because a moving platform is the same check.
+        """
+        return [
+            name for name in self.created_objects()
+            if name.strip().lower() != "player"
+        ][:limit]
+
+    def autonomous_motion_delta(self) -> tuple[str, float] | None:
+        """Largest distance any sampled object covered with no input given."""
+        best: tuple[str, float] | None = None
+        for name, before in self.autonomous_before.items():
+            after = self.autonomous_after.get(name)
+            if after is None:
+                continue
+            moved = sum((a - b) ** 2 for a, b in zip(after, before)) ** 0.5
+            if best is None or moved > best[1]:
+                best = (name, moved)
+        return best
+
     def _find_node(self, name: str) -> dict | None:
         """Locate one object anywhere in the observed hierarchy."""
         wanted = name.strip().lower()
@@ -1026,6 +1095,14 @@ class VerificationContract:
                 failed.append(f"runtime_errors:{self.runtime_error_count}")
         if self.spec.require_level_marker and not self.level_marker_seen:
             failed.append("level_loaded_marker_missing")
+        if self.spec.require_autonomous_motion:
+            best = self.autonomous_motion_delta()
+            if "gameplay" in self.blocked_by or "movement" in self.blocked_by:
+                pass
+            elif best is None:
+                failed.append("autonomous_motion_not_measured")
+            elif best[1] < self.spec.autonomous_min_distance:
+                failed.append("no_object_moved_on_its_own")
         if self.spec.require_movement:
             # "rightArrow" is the canonical label for the rightward sample; the
             # bidirectional "d" sample proves the same capability when the
@@ -1195,6 +1272,7 @@ class VerificationContract:
         measured = {
             "scene_objects": self.hierarchy_seen,
             "player_visible": self._player_renderer_seen() is not None,
+            "autonomous_motion": self.autonomous_motion_delta() is not None,
             "gameplay": self.played and self.waited and self.runtime_checked,
             "movement": pair(self.motion_before, self.motion_after, "rightArrow")
                         or (self.movement_before is not None
@@ -1262,6 +1340,10 @@ class VerificationContract:
             },
             "scene_objects": self.created_objects() if self.hierarchy_seen else None,
             "player_has_renderer": self._player_renderer_seen(),
+            "autonomous_motion": (
+                None if (best := self.autonomous_motion_delta()) is None
+                else {"object": best[0], "distance": round(best[1], 4)}
+            ),
             "components": self.observed_components,
             "component_data": self.observed_component_data,
             "player_movement_delta": delta(self.movement_before, self.movement_after),
@@ -1311,6 +1393,8 @@ class VerificationContract:
 _FAILURE_CHECK_PREFIXES = (
     ("scene_has_no_created_objects", "scene_objects"),
     ("scene_contents_not_observed", "scene_objects"),
+    ("no_object_moved_on_its_own", "autonomous_motion"),
+    ("autonomous_motion_not_measured", "autonomous_motion"),
     ("player_has_no_renderer", "player_visible"),
     ("player_visibility_not_measured", "player_visible"),
     ("player_did_not_land", "jump_landing"),
@@ -1427,6 +1511,15 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
                 "배치하지 않았거나, 다른 씬에 만들었거나, 저장 전에 씬을 바꿨을 수 "
                 "있다. unity_create_gameobject로 요청한 오브젝트를 활성 씬에 만들고 "
                 "unity_save_scene까지 한 뒤 unity_get_hierarchy로 확인한다."
+            )
+        if failure == "no_object_moved_on_its_own":
+            lint_guidance.append(
+                "- no_object_moved_on_its_own: 스스로 움직여야 하는 오브젝트가 "
+                "입력 없는 구간에서 제자리에 있었다. 순찰 스크립트를 만들어 실제 "
+                "오브젝트에 붙였는지 확인한다(스크립트만 쓰고 add_component를 "
+                "빠뜨리는 경우가 많다). Update에서 transform.Translate 또는 "
+                "rb.linearVelocity로 매 프레임 위치를 바꾸고, 왕복 한계에 닿으면 "
+                "방향을 뒤집는다. 플레이어 입력과 무관해야 한다."
             )
         if failure == "player_has_no_renderer":
             lint_guidance.append(
