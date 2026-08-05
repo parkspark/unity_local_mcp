@@ -944,9 +944,9 @@ class Agent:
                     })
                 if spec.require_movement or spec.require_jump or spec.require_boost:
                     await self._verification_call(contract, "unity_get_input_state", {})
-                # 이동·점프 측정이 끝난 뒤 같은 오브젝트를 다시 훑는다. 그 사이에
-                # 플레이어가 지나간 구간은 contract.player_sweep()이 알고 있으므로,
-                # "닿았어야 하는데 그대로인가"를 사후에 따질 수 있다.
+                # 이동·점프 측정이 끝난 뒤 같은 오브젝트를 다시 훑는다. 그 사이
+                # 플레이어가 실제로 간 지점은 contract.player_samples에 쌓여 있으므로
+                # "얼마나 가까이 갔는데 그대로인가"를 사후에 따질 수 있다.
                 if contract.contact_before and await confirm_play_active():
                     await sample_objects(contract.contact_after)
         except (TypeError, ValueError, AttributeError, KeyError) as error:

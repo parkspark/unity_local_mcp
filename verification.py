@@ -134,10 +134,6 @@ _AUTONOMOUS_WORDS = (
 # 한쪽 이동이 반대쪽의 이 비율에 못 미치면 그 방향이 막힌 것으로 본다. 기록된
 # 119건의 분포에서 정상은 0.96 이상, 막힌 것은 0.42 이하이고 그 사이가 비어 있다.
 _BLOCKED_PATH_RATIO = 0.5
-# 접촉 판단의 여유. 플레이어 캡슐 반지름 0.5와 코인 반쪽 크기를 합친 정도이고,
-# 높이는 캡슐 높이 2를 기준으로 잡았다. 기록 전용이라 아직 판정에 쓰지 않는다.
-_CONTACT_MARGIN = 1.0
-_CONTACT_HEIGHT = 1.5
 # 새 씬이 기본으로 갖는 오브젝트. 이것만 남아 있으면 아무것도 만들어지지 않았다.
 _DEFAULT_SCENE_OBJECTS = frozenset({
     "main camera", "directional light", "global volume",
@@ -696,6 +692,8 @@ class VerificationContract:
     observed_component_data: dict[str, dict[str, dict]] = field(default_factory=dict)
     latest_positions: dict[str, tuple[float, float, float]] = field(default_factory=dict)
     latest_active: dict[str, bool] = field(default_factory=dict)
+    # 검증이 실제로 플레이어를 데려간 모든 지점. 접촉 판단의 원자료다.
+    player_samples: list = field(default_factory=list)
     movement_before: tuple[float, float, float] | None = None
     movement_after: tuple[float, float, float] | None = None
     camera_before: tuple[float, float, float] | None = None
@@ -869,6 +867,8 @@ class VerificationContract:
                 self.latest_active[target.lower()] = bool(data.get("activeSelf"))
             if pos is not None:
                 self.latest_positions[target.lower()] = pos
+                if target.lower() == "player" and pos not in self.player_samples:
+                    self.player_samples.append(pos)
                 if target.lower() == "player":
                     if self.movement_input_seen:
                         self.movement_after = pos
@@ -953,32 +953,32 @@ class VerificationContract:
                 best = (name, moved)
         return best
 
-    def player_sweep(self) -> tuple[float, float, float] | None:
-        """(최소 X, 최대 X, 대표 Y) — 검증이 플레이어를 실제로 지나가게 한 구간."""
-        xs, ys = [], []
-        for store in (self.motion_before, self.motion_after):
-            for pos in store.values():
-                xs.append(pos[0])
-                ys.append(pos[1])
-        if not xs:
+    def nearest_player_distance(self, pos) -> float | None:
+        """이 좌표에 플레이어가 가장 가까이 왔던 거리."""
+        if pos is None or not self.player_samples:
             return None
-        return min(xs), max(xs), sum(ys) / len(ys)
+        return min(
+            sum((a - b) ** 2 for a, b in zip(pos, sample)) ** 0.5
+            for sample in self.player_samples
+        )
 
     def contact_report(self) -> list[dict]:
-        """접촉 반응의 재료. 판정하지 않고 기록만 한다.
+        """접촉 반응의 재료. 판정하지 않고 거리만 남긴다.
 
         A0의 막힌 지점은 "호스트가 접촉을 일으킬 수 없다"가 아니라 **"안 사라졌을 때
-        고장인지 안 닿은 건지 모른다"**는 비대칭이었다. 그 비대칭은 풀 수 있다 —
-        호스트는 플레이어가 실제로 지나간 X 구간과 오브젝트 좌표를 둘 다 갖고 있으므로,
-        **닿았어야 하는지를 계산할 수 있다.**
+        고장인지 안 닿은 건지 모른다"**는 비대칭이었다. 플레이어가 실제로 간 지점들을
+        갖고 있으면 그 비대칭은 거리로 표현된다 — 가까이 갔는데 그대로면 고장이고,
+        멀리 있었으면 판정할 수 없다.
 
-        - `passed=True`인데 그대로 있으면 → 접촉 반응이 동작하지 않은 것이다
-        - `passed=False`면 → 판정하지 않는다(미측정). 실패로 세면 안 된다
+        **불린으로 남기지 않는다.** 첫 실측(2026-08-05)이 그 이유를 보여줬다. X 구간과
+        대표 Y로 경계 상자를 만들어 `player_passed`를 계산했더니, 점프로 닿은
+        `Coin_2`(y 4)를 "안 닿았다"로 판정했다. 점프 높이를 상자에 넣으면 이번에는
+        `Coin_3`(−2, 3)처럼 **플레이어가 그 x에 있을 때는 땅에 있었고 그 높이에 있을
+        때는 다른 x에 있었던** 오브젝트까지 "지나갔다"가 된다. 상자는 경로가 아니다.
 
-        지금은 이 판단을 실패 코드로 만들지 않는다. 어느 정도 빈도로 `passed`가
-        성립하는지, 좌표 여유를 얼마로 둬야 하는지 실측이 없다.
+        그래서 임계값을 굽지 않고 **가장 가까웠던 거리**를 그대로 남긴다. 표본이
+        쌓이면 그때 판정 기준을 고른다.
         """
-        sweep = self.player_sweep()
         report: list[dict] = []
         for name, before in self.contact_before.items():
             after = self.contact_after.get(name)
@@ -988,17 +988,13 @@ class VerificationContract:
                 gone = bool(after.get("missing")) or (
                     before.get("active") and not after.get("active")
                 )
-            passed = None
-            if sweep is not None and pos is not None:
-                low, high, player_y = sweep
-                passed = (
-                    low - _CONTACT_MARGIN <= pos[0] <= high + _CONTACT_MARGIN
-                    and abs(pos[1] - player_y) <= _CONTACT_HEIGHT
-                )
+            distance = self.nearest_player_distance(pos)
             report.append({
                 "object": name,
                 "position": [round(v, 3) for v in pos] if pos else None,
-                "player_passed": passed,
+                "nearest_player_distance": (
+                    None if distance is None else round(distance, 3)
+                ),
                 "disappeared": gone,
             })
         return report

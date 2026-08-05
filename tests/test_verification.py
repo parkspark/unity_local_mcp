@@ -1854,32 +1854,33 @@ class BlockedMovementPathTests(unittest.TestCase):
 
 
 class ContactCandidateRecordingTests(unittest.TestCase):
-    """접촉 반응(A0)의 설계 입력. 판정하지 않고 기록만 한다.
+    """접촉 반응(A0)의 설계 입력. 판정하지 않고 거리만 기록한다.
 
     막힌 지점은 "호스트가 접촉을 일으킬 수 없다"가 아니라 **"안 사라졌을 때 고장인지
-    안 닿은 건지 모른다"**는 비대칭이었다. 호스트는 플레이어가 실제로 지나간 X 구간과
-    오브젝트 좌표를 둘 다 갖고 있으므로 그 비대칭은 계산으로 풀린다.
+    안 닿은 건지 모른다"**는 비대칭이었다. 플레이어가 실제로 간 지점들을 남기면 그
+    비대칭이 거리로 표현된다.
     """
 
-    def _contract(self, before, after, sweep=((0.0, 1.0, 0.0), (5.0, 1.0, 0.0))):
+    def _contract(self, before, after, samples=((0.0, 1.0, 0.0), (5.0, 1.0, 0.0))):
         spec = VerificationSpec.from_request(
             "Assets/Scenes/C.unity 경로에 새 씬을 생성하고 Player와 바닥을 만들어 "
             "A/D 이동을 구현해줘"
         )
         contract = VerificationContract(spec=spec, project_dir="")
-        contract.motion_before["d"], contract.motion_after["d"] = sweep
+        contract.player_samples.extend(samples)
         contract.contact_before.update(before)
         contract.contact_after.update(after)
         return contract
 
-    def test_an_object_on_the_path_that_vanished_is_recorded(self):
+    def test_an_object_the_player_reached_and_that_vanished_is_recorded(self):
         report = self._contract(
             {"Coin_1": {"position": (2.0, 2.0, 0.0), "active": True, "missing": False}},
             {"Coin_1": {"position": None, "active": False, "missing": False}},
         ).contact_report()
         self.assertEqual(report[0]["object"], "Coin_1")
-        self.assertTrue(report[0]["player_passed"])
         self.assertTrue(report[0]["disappeared"])
+        # (2,2,0)에서 (0,1,0)까지 sqrt(5) ≈ 2.236
+        self.assertAlmostEqual(report[0]["nearest_player_distance"], 2.236, places=2)
 
     def test_destroyed_objects_count_as_disappeared_too(self):
         """SetActive(false)와 Destroy를 둘 다 잡아야 한다."""
@@ -1889,36 +1890,46 @@ class ContactCandidateRecordingTests(unittest.TestCase):
         ).contact_report()
         self.assertTrue(report[0]["disappeared"])
 
-    def test_an_object_the_player_never_reached_is_marked_unpassed(self):
-        """이것이 비대칭을 푸는 지점 — 안 닿았으면 실패로 셀 수 없다."""
+    def test_distance_separates_reachable_from_unreachable(self):
+        """비대칭을 푸는 지점 — 멀리 있었으면 안 사라진 것을 고장이라 할 수 없다."""
         report = self._contract(
             {"Coin_far": {"position": (40.0, 2.0, 0.0), "active": True, "missing": False}},
             {"Coin_far": {"position": (40.0, 2.0, 0.0), "active": True, "missing": False}},
         ).contact_report()
-        self.assertFalse(report[0]["player_passed"])
+        self.assertGreater(report[0]["nearest_player_distance"], 30)
         self.assertFalse(report[0]["disappeared"])
 
-    def test_height_is_part_of_reaching_something(self):
-        """플레이어 머리 훨씬 위의 코인은 X가 겹쳐도 닿은 것이 아니다."""
-        report = self._contract(
-            {"Coin_high": {"position": (2.0, 9.0, 0.0), "active": True, "missing": False}},
-            {"Coin_high": {"position": (2.0, 9.0, 0.0), "active": True, "missing": False}},
-        ).contact_report()
-        self.assertFalse(report[0]["player_passed"])
+    def test_the_jump_peak_is_part_of_where_the_player_went(self):
+        """실측 Coin_2(y 4)는 점프로 닿았다. 이동 표본만 보면 놓친다."""
+        near_ground = self._contract(
+            {"Coin_2": {"position": (0.0, 4.0, 0.0), "active": True, "missing": False}},
+            {},
+        )
+        self.assertGreater(near_ground.contact_report()[0]["nearest_player_distance"], 2.9)
+        with_jump = self._contract(
+            {"Coin_2": {"position": (0.0, 4.0, 0.0), "active": True, "missing": False}},
+            {},
+            samples=((0.0, 1.0, 0.0), (5.0, 1.0, 0.0), (0.0, 4.2, 0.0)),
+        )
+        self.assertLess(with_jump.contact_report()[0]["nearest_player_distance"], 0.5)
 
-    def test_the_sweep_comes_from_real_samples(self):
-        contract = self._contract({}, {})
-        self.assertEqual(contract.player_sweep(), (0.0, 5.0, 1.0))
+    def test_no_samples_means_no_distance_not_a_zero(self):
+        contract = self._contract(
+            {"Coin_1": {"position": (2.0, 2.0, 0.0), "active": True, "missing": False}},
+            {},
+            samples=(),
+        )
+        self.assertIsNone(contract.contact_report()[0]["nearest_player_distance"])
 
     def test_recording_never_changes_the_verdict(self):
         """A0는 아직 검사가 아니다. 기록이 실패를 만들면 규칙을 어기는 것이다."""
-        passed = self._contract(
+        recorded = self._contract(
             {"Coin_1": {"position": (2.0, 2.0, 0.0), "active": True, "missing": False}},
             {"Coin_1": {"position": (2.0, 2.0, 0.0), "active": True, "missing": False}},
         )
         bare = self._contract({}, {})
-        self.assertEqual(passed.failures(), bare.failures())
-        self.assertIsNotNone(passed.evidence()["contact_candidates"])
+        self.assertEqual(recorded.failures(), bare.failures())
+        self.assertIsNotNone(recorded.evidence()["contact_candidates"])
 
 
 class AutonomousMotionTests(unittest.TestCase):
