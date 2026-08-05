@@ -10,7 +10,7 @@
 ![alt text](data/0703_unity_mcp1.gif)
 
 
-로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.20**이다.
+로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.21**이다.
 기존 [unity_mcp](../unity_mcp) MCP 서버와 Unity 브리지를 재사용하고
 (v1.7부터 send_key 등 일부 확장), Claude Code의 자리를 로컬 모델이 대신한다.
 
@@ -579,3 +579,14 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           더 좋아 보였습니다. 다중 사이클 영수증 53건을 재생해 **선택이 바뀐 것은
           1건 — 이 결함을 드러낸 그 실행뿐**입니다.
           상세: [docs/v1.11.20_receipt_survival_and_rollback_score.md](docs/v1.11.20_receipt_survival_and_rollback_score.md)
+
+- ver 1.11.21 - **막힌 방향을 배치 문제로 판정합니다.** 시작 지점 옆에 플랫폼이 있으면
+          그 방향 이동이 짧아지는데, 호스트가 그것을 `a_did_not_move_left`로 보고해
+          **repair가 멀쩡한 스크립트를 고치러 갔습니다** — v1.11.15가 실측하고 안내로
+          대응했다가 재발을 확인한 항목입니다. 기록된 좌우 동시 측정 **119건**의 비율
+          분포를 보니 정상은 0.96~1.00, 막힘은 0.00~0.42이고 **그 사이가 비어 있어**
+          임계값 0.5를 가정 없이 고를 수 있었습니다. 재생 결과 **108건 판정 유지 ·
+          7건 오진 교체 · 4건 신규 적발 · 오탐 0**이고, `verified`가 `failed`로 뒤집히는
+          영수증은 **하나**(D +2.06 / A −5.05로 막힌 배치가 통과했던 실행)입니다.
+          양쪽이 같이 실패하는 입력 결함과 폭주 물리는 배제 조건으로 갈라 뒀습니다.
+          상세: [docs/v1.11.21_movement_path_blocked.md](docs/v1.11.21_movement_path_blocked.md)

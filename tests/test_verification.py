@@ -1773,6 +1773,86 @@ class BuilderScriptLintScopeTests(unittest.TestCase):
         self.assertIn("삭제하지 말고", prompt)
 
 
+class BlockedMovementPathTests(unittest.TestCase):
+    """장애물에 막힌 방향을 입력 코드의 결함으로 보고했다.
+
+    v1.11.15 §5가 실측했다 — 시작 지점 옆에 플랫폼이 있으면 그 방향 거리가 짧아지고,
+    호스트는 `a_did_not_move_left`를 낸다. repair는 멀쩡한 스크립트를 고치러 가고,
+    **코드를 고쳐서는 절대 통과할 수 없다.** 안내만 넣은 뒤에도 재발했다.
+
+    기록된 d/a 동시 측정 119건의 비율 분포가 판정 근거다 — 정상 0.96~1.00,
+    막힘 0.00~0.42, 그 사이는 비어 있다.
+    """
+
+    def _contract(self, dx, ax, duration=1.0):
+        spec = VerificationSpec.from_request(
+            "Assets/Scenes/M.unity 경로에 새 씬을 생성하고 Player와 바닥을 만들어 "
+            "A/D 좌우 이동을 구현해줘"
+        )
+        contract = VerificationContract(spec=spec, project_dir="")
+        contract.motion_duration["d"] = contract.motion_duration["a"] = duration
+        contract.motion_before["d"] = (0.0, 1.0, 0.0)
+        contract.motion_after["d"] = (dx, 1.0, 0.0)
+        contract.motion_before["a"] = (0.0, 1.0, 0.0)
+        contract.motion_after["a"] = (ax, 1.0, 0.0)
+        return contract
+
+    def test_the_misdiagnosed_sample_now_names_the_layout(self):
+        """실측 D +0.47 / A −4.69 — 기존에는 `d_did_not_move_right`였다."""
+        failures = self._contract(0.47, -4.69).failures()
+        self.assertIn("movement_path_blocked:d", failures)
+        self.assertNotIn("d_did_not_move_right", failures)
+
+    def test_an_obstructed_layout_that_used_to_pass_now_fails(self):
+        """실측 D +2.06 / A −5.05 — 둘 다 최소 거리를 넘어 조용히 통과했다.
+
+        영수증 20260730_113527이 그 상태로 `verified`였다.
+        """
+        self.assertIn("movement_path_blocked:d", self._contract(2.06, -5.05).failures())
+
+    def test_both_directions_failing_is_still_an_input_defect(self):
+        """양쪽이 같이 못 가면 장애물이 아니라 코드다. 여기서 갈라지면 안 된다."""
+        for dx, ax in ((0.0, 0.0), (1.44, -1.46)):
+            with self.subTest(dx=dx):
+                failures = self._contract(dx, ax).failures()
+                self.assertFalse(
+                    any(f.startswith("movement_path_blocked") for f in failures),
+                    failures,
+                )
+                self.assertIn("d_did_not_move_right", failures)
+                self.assertIn("a_did_not_move_left", failures)
+
+    def test_runaway_physics_is_not_reported_as_a_wall(self):
+        """실측 D +2.5 / A −115.19 — 비율은 낮지만 원인이 다르다."""
+        failures = self._contract(2.5, -115.19, duration=0.5).failures()
+        self.assertFalse(
+            any(f.startswith("movement_path_blocked") for f in failures), failures
+        )
+        self.assertIn("a_moved_too_far", failures)
+
+    def test_healthy_and_borderline_runs_are_left_alone(self):
+        """정상 구간(0.96~1.00)과 애매한 0.70은 건드리지 않는다."""
+        for dx, ax in ((4.95, -4.95), (4.86, -5.07), (3.53, -5.05)):
+            with self.subTest(dx=dx, ax=ax):
+                self.assertFalse(
+                    any(f.startswith("movement_path_blocked")
+                        for f in self._contract(dx, ax).failures())
+                )
+
+    def test_the_repair_prompt_forbids_touching_the_script(self):
+        spec = VerificationSpec.from_request("A/D 좌우 이동을 구현해줘")
+        prompt = fix_prompt(spec, ["movement_path_blocked:d"], {})
+        self.assertIn("배치 문제", prompt)
+        self.assertIn("입력 코드를 고치지 마라", prompt)
+        self.assertIn("unity_modify_gameobject", prompt)
+
+    def test_it_belongs_to_the_bidirectional_check(self):
+        """회귀 판정이 이것을 새 종류의 실패로 보면 롤백이 어긋난다."""
+        self.assertEqual(
+            failure_check_name("movement_path_blocked:d"), "bidirectional"
+        )
+
+
 class AutonomousMotionTests(unittest.TestCase):
     """스스로 움직여야 하는 것이 움직이는지 보는 검사가 없었다.
 

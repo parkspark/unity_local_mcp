@@ -131,6 +131,9 @@ _AUTONOMOUS_WORDS = (
     "순찰", "patrol", "자동으로 움직", "자동 이동", "스스로 움직", "혼자 움직",
     "왔다갔다", "왔다 갔다", "자동으로 좌우", "자동 순찰",
 )
+# 한쪽 이동이 반대쪽의 이 비율에 못 미치면 그 방향이 막힌 것으로 본다. 기록된
+# 119건의 분포에서 정상은 0.96 이상, 막힌 것은 0.42 이하이고 그 사이가 비어 있다.
+_BLOCKED_PATH_RATIO = 0.5
 # 새 씬이 기본으로 갖는 오브젝트. 이것만 남아 있으면 아무것도 만들어지지 않았다.
 _DEFAULT_SCENE_OBJECTS = frozenset({
     "main camera", "directional light", "global volume",
@@ -985,6 +988,46 @@ class VerificationContract:
             )
         return None
 
+    def _blocked_movement_direction(self, d, a) -> str | None:
+        """Which direction a wall stopped, or None if this is not that shape.
+
+        v1.11.15가 실측한 실패 모드다 — 시작 지점 옆에 플랫폼이 있으면 그 방향의
+        이동 거리가 짧아지고, 호스트는 그것을 입력 코드의 결함으로 보고한다.
+        repair는 멀쩡한 스크립트를 고치러 가고, **코드를 고쳐서는 절대 통과할 수
+        없다.**
+
+        기록된 d/a 동시 측정 119건의 비율 분포가 이 판정을 가능하게 한다.
+
+            정상          0.96 ~ 1.00   (대다수)
+            (빈 구간)     0.43 ~ 0.95
+            막힘          0.00 ~ 0.42
+
+        0.5는 그 빈 구간 한가운데다. 3.53/5.05(0.70)처럼 애매한 표본은 건드리지
+        않는다.
+
+        두 가지를 반드시 배제한다.
+        - **양쪽 다 실패**하면 장애물이 아니라 입력 코드다. 한쪽이 최소 거리를
+          넘겨 "이 방향은 된다"를 증명했을 때만 성립한다.
+        - **폭주 물리**(0.5초에 115유닛)는 비율이 낮게 나오지만 원인이 다르다.
+          성공한 쪽이 상한 안에 있어야 한다.
+        """
+        if None in d or None in a:
+            return None
+        forward = d[1][0] - d[0][0]
+        backward = -(a[1][0] - a[0][0])
+        pairs = (("d", forward, self.motion_duration.get("d")),
+                 ("a", backward, self.motion_duration.get("a")))
+        (short_name, short, _), (long_name, long_, long_duration) = sorted(
+            pairs, key=lambda item: item[1]
+        )
+        if long_ < self.spec.movement_min_distance:
+            return None                       # 양쪽 다 못 갔다 — 입력 코드다
+        if long_ > self.spec.movement_max_distance(long_duration):
+            return None                       # 폭주 물리는 별개 결함이다
+        if short >= long_ * _BLOCKED_PATH_RATIO:
+            return None
+        return short_name
+
     def _camera_player_gap(self, label: str | None) -> float | None:
         """Distance between the camera and the player when a motion started.
 
@@ -1149,26 +1192,30 @@ class VerificationContract:
         if self.spec.require_bidirectional:
             d = self.motion_before.get("d"), self.motion_after.get("d")
             a = self.motion_before.get("a"), self.motion_after.get("a")
+            blocked_direction = self._blocked_movement_direction(d, a)
             if "movement" in self.blocked_by:
                 pass
-            elif None in d:
-                failed.append("d_movement_not_measured")
-            elif d[1][0] - d[0][0] < self.spec.movement_min_distance:
-                failed.append("d_did_not_move_right")
-            elif d[1][0] - d[0][0] > self.spec.movement_max_distance(
-                self.motion_duration.get("d")
-            ):
-                failed.append("d_moved_too_far")
-            if "movement" in self.blocked_by:
-                pass
-            elif None in a:
-                failed.append("a_movement_not_measured")
-            elif a[1][0] - a[0][0] > -self.spec.movement_min_distance:
-                failed.append("a_did_not_move_left")
-            elif a[0][0] - a[1][0] > self.spec.movement_max_distance(
-                self.motion_duration.get("a")
-            ):
-                failed.append("a_moved_too_far")
+            elif blocked_direction is not None:
+                # 한쪽은 제대로 갔는데 반대쪽만 짧다. 입력 코드가 원인이라면 양쪽이
+                # 같이 실패한다 — 이 형태는 그 방향에 장애물이 있다는 뜻이다.
+                failed.append(f"movement_path_blocked:{blocked_direction}")
+            else:
+                if None in d:
+                    failed.append("d_movement_not_measured")
+                elif d[1][0] - d[0][0] < self.spec.movement_min_distance:
+                    failed.append("d_did_not_move_right")
+                elif d[1][0] - d[0][0] > self.spec.movement_max_distance(
+                    self.motion_duration.get("d")
+                ):
+                    failed.append("d_moved_too_far")
+                if None in a:
+                    failed.append("a_movement_not_measured")
+                elif a[1][0] - a[0][0] > -self.spec.movement_min_distance:
+                    failed.append("a_did_not_move_left")
+                elif a[0][0] - a[1][0] > self.spec.movement_max_distance(
+                    self.motion_duration.get("a")
+                ):
+                    failed.append("a_moved_too_far")
         if self.spec.require_jump:
             if "jump" in self.blocked_by:
                 pass
@@ -1418,6 +1465,7 @@ _FAILURE_CHECK_PREFIXES = (
     ("player_did_not_move_right", "movement"),
     ("player_moved_too_far", "movement"),
     ("player_movement_not_measured", "movement"),
+    ("movement_path_blocked", "bidirectional"),
     ("d_did_not_move_right", "bidirectional"),
     ("d_moved_too_far", "bidirectional"),
     ("d_movement_not_measured", "bidirectional"),
@@ -1569,6 +1617,19 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
                 "- camera_target_null: Main Camera의 SideScrollerCamera.target에 "
                 "기존 Player Transform을 직렬화해 연결한다. undefined tag 검색에 "
                 "의존하지 않는다."
+            )
+        if failure.startswith("movement_path_blocked:"):
+            direction = "오른쪽" if failure.endswith(":d") else "왼쪽"
+            other = "왼쪽" if failure.endswith(":d") else "오른쪽"
+            lint_guidance.append(
+                f"- movement_path_blocked: {other} 이동은 정상인데 {direction}만 "
+                f"짧게 끊겼다. 양쪽이 같은 코드를 쓰므로 **이것은 스크립트 결함이 "
+                f"아니라 배치 문제다 — 입력 코드를 고치지 마라.** {direction}에 "
+                "플레이어와 같은 높이로 놓인 플랫폼·벽·중복 콜라이더를 찾아 치우거나 "
+                "위로 올린다. 시작 지점 좌우 각 8유닛에는 수직 장애물이 없어야 하고, "
+                "플레이어는 그 평지 중앙의 겹치지 않는 위치에 있어야 한다. "
+                "unity_get_hierarchy로 좌표를 확인한 뒤 unity_modify_gameobject로 "
+                "옮긴다. 새 씬을 만들지 말고 스크립트도 다시 쓰지 마라."
             )
         if "a_did_not_move_left" in failure or "left_boost_distance_too_short" in failure:
             lint_guidance.append(

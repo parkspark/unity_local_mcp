@@ -1,7 +1,7 @@
 # AGENTS.md — unity_local_mcp 작업 규칙
 
 로컬 LLM(Ollama `qwen3-coder:30b`)으로 Unity Editor를 제어하는 에이전트 CLI.
-현재 v1.11.20. 이 저장소에서 작업하는 모든 에이전트는 아래 규칙을 따른다.
+현재 v1.11.21. 이 저장소에서 작업하는 모든 에이전트는 아래 규칙을 따른다.
 
 ---
 
@@ -91,7 +91,7 @@ uv run python main.py --prompt-file <파일>
 ## 5. 표준 명령
 
 ```bash
-# 테스트 (현재 259개 통과, subtest 43개 통과)
+# 테스트 (현재 266개 통과, subtest 48개 통과)
 uv run python -m pytest tests/
 
 # 로컬 모델 E2E — 빌더부터 전체
