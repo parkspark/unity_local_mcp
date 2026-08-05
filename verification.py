@@ -716,8 +716,22 @@ class VerificationContract:
     policy_violations: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        # 요청이 명시한 경로만 보면 정적 검사가 통째로 꺼진다. "새 씬을 만들고
+        # ~를 구현해줘"류 요청은 스크립트 경로를 말하지 않으므로 `asset_paths`에
+        # 씬 하나만 들어오고, **빌더가 스스로 만든 스크립트는 한 번도 검사되지
+        # 않았다.** 2026-08-03 코인 실행이 `CompareTag("Coin")`을 담은 채
+        # `verified`로 나간 것이 그 결과다 — 프로젝트 태그는 비어 있어서 트리거가
+        # 걸리는 순간 `Tag: Coin is not defined`를 던진다. 이 규칙은 정확히 그
+        # 경우를 위해 있었는데 대상 목록에 파일이 없어 돌지 않았다.
+        #
+        # 기록된 실행 109개의 빌더 산출 스크립트 158개를 재생하면 21개 실행에서
+        # 위반 41건이 나오고, 현재 규칙이 모두 들어간 7/29 이후로 좁히면 78개 중
+        # 5건이다. 다섯 건 모두 미정의 태그이고 오탐은 없었다.
+        targets = list(dict.fromkeys(
+            list(self.spec.asset_paths) + sorted(self.session_scripts)
+        ))
         self.policy_violations = lint_scripts(
-            self.spec.request, self.spec.asset_paths, self.project_dir
+            self.spec.request, targets, self.project_dir
         )
 
     def block(self, stage: str, reason: str) -> None:
@@ -1468,10 +1482,26 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
     lint_guidance = []
     for failure in failures:
         if "undefined_compare_tag:" in failure:
+            # 실패 문자열은 `policy_lint:undefined_compare_tag:<경로>:<태그>` 형태로
+            # 오지만, lint가 직접 낸 목록에는 접두사가 없다. 양쪽을 다 받는다.
+            tag = next(
+                (item.rsplit(":", 1)[-1] for item in failures
+                 if "undefined_compare_tag:" in item and item.count(":") >= 2),
+                "Target",
+            )
+            # 예전 안내는 "분기 또는 OnTriggerEnter를 통째로 삭제하라"였다. 접지
+            # 판정에는 맞았지만, 정적 검사가 빌더 산출 스크립트까지 보게 된 뒤로는
+            # 그 분기가 사용자가 요청한 기능(코인 획득, 골인 판정)인 경우가 생긴다.
+            # 삭제하면 결함 대신 기능이 사라진다. 대상 식별은 마커 컴포넌트로 옮긴다.
             lint_guidance.append(
-                "- undefined_compare_tag: 해당 CompareTag 호출이 포함된 분기 또는 "
-                "OnTriggerEnter 메서드를 코드에서 완전히 삭제한다. 금지된 태그 이름을 "
-                "주석에도 남기지 않고, 새 태그를 만들지 않는다."
+                f"- undefined_compare_tag: 프로젝트에 `{tag}` 태그가 없어 그 "
+                f"CompareTag는 런타임에 `Tag: {tag} is not defined`를 던진다. "
+                "태그를 만들지 말고 마커 컴포넌트로 바꾼다 — "
+                f"`public class {tag} : MonoBehaviour {{}}`를 별도 파일로 쓰고 "
+                f"unity_add_component로 해당 오브젝트들에 붙인 뒤, 조건을 "
+                f"`other.GetComponent<{tag}>() != null`로 바꾼다. "
+                "요청이 그 분기의 동작을 요구했다면 분기를 삭제하지 말고 조건만 "
+                "바꾼다. 접지 판정이라면 대신 contact.normal을 쓴다."
             )
         if "fall_respawn_check_missing:" in failure:
             lint_guidance.append(

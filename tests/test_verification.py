@@ -1616,6 +1616,70 @@ class SceneContentTests(unittest.TestCase):
         self.assertIn("verification_spec_empty", contract.failures())
 
 
+class BuilderScriptLintScopeTests(unittest.TestCase):
+    """정적 검사가 요청에 적힌 경로 밖을 보지 못했다.
+
+    "새 씬을 만들고 ~를 구현해줘"는 스크립트 경로를 말하지 않으므로
+    `spec.asset_paths`에 씬 하나만 들어오고, 빌더가 스스로 만든 스크립트는 한 번도
+    검사되지 않았다. 2026-08-03 코인 실행이 `CompareTag("Coin")`을 담은 채
+    `verified`로 나갔다 — 프로젝트 태그가 비어 있어 트리거가 걸리는 순간
+    `Tag: Coin is not defined`를 던진다.
+    """
+
+    REQUEST = (
+        "Assets/Scenes/Ix.unity 경로에 새 씬을 생성하고, Player(캡슐)를 만들어 "
+        "A/D 이동을 구현해줘. 코인에 닿으면 점수가 1 올라가게 해줘."
+    )
+    SCRIPT = (
+        "using UnityEngine;\n"
+        "public class PlayerMovement : MonoBehaviour {\n"
+        "  int score;\n"
+        "  void OnTriggerEnter(Collider other) {\n"
+        "    if (other.CompareTag(\"Coin\")) { score++; Destroy(other.gameObject); }\n"
+        "  }\n"
+        "}\n"
+    )
+
+    def _contract(self, session_scripts):
+        project = tempfile.mkdtemp()
+        scripts = os.path.join(project, "Assets", "Scripts")
+        os.makedirs(scripts)
+        with open(os.path.join(scripts, "PlayerMovement.cs"), "w", encoding="utf-8") as h:
+            h.write(self.SCRIPT)
+        spec = VerificationSpec.from_request(self.REQUEST)
+        self.assertNotIn("Assets/Scripts/PlayerMovement.cs", spec.asset_paths)
+        return VerificationContract(
+            spec=spec, project_dir=project, session_scripts=set(session_scripts)
+        )
+
+    def test_a_builder_written_script_is_linted(self):
+        contract = self._contract({"Assets/Scripts/PlayerMovement.cs"})
+        self.assertTrue(
+            any(v.startswith("undefined_compare_tag") for v in contract.policy_violations),
+            contract.policy_violations,
+        )
+
+    def test_without_the_session_list_the_defect_is_invisible(self):
+        """이 대비가 없으면 위 테스트가 무엇을 지키는지 알 수 없다."""
+        contract = self._contract(set())
+        self.assertEqual(contract.policy_violations, [])
+
+    def test_the_repair_prompt_keeps_the_feature_and_swaps_the_condition(self):
+        """예전 안내는 분기를 통째로 삭제하라고 했다.
+
+        접지 판정에는 맞았지만 그 분기가 사용자가 요청한 기능(코인 획득)인 경우
+        결함 대신 기능이 사라진다.
+        """
+        spec = VerificationSpec.from_request(self.REQUEST)
+        prompt = fix_prompt(
+            spec,
+            ["policy_lint:undefined_compare_tag:Assets/Scripts/PlayerMovement.cs:Coin"],
+            {},
+        )
+        self.assertIn("GetComponent<Coin>()", prompt)
+        self.assertIn("삭제하지 말고", prompt)
+
+
 class AutonomousMotionTests(unittest.TestCase):
     """스스로 움직여야 하는 것이 움직이는지 보는 검사가 없었다.
 

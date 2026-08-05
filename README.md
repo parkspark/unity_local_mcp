@@ -10,7 +10,7 @@
 ![alt text](data/0703_unity_mcp1.gif)
 
 
-로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.18**이다.
+로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.19**이다.
 기존 [unity_mcp](../unity_mcp) MCP 서버와 Unity 브리지를 재사용하고
 (v1.7부터 send_key 등 일부 확장), Claude Code의 자리를 로컬 모델이 대신한다.
 
@@ -554,3 +554,16 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           측정 0.8초와 일치). 접촉 대상 식별은 태그 대신 **마커 컴포넌트** 패턴을
           열었습니다.
           상세: [docs/v1.11.18_autonomous_motion_and_leaky_detector.md](docs/v1.11.18_autonomous_motion_and_leaky_detector.md)
+
+- ver 1.11.19 - **정적 검사가 빌더 산출물을 보지 못했다.** `policy_lint`는 요청 문장이
+          명시한 스크립트 경로만 검사하는데, 자연스러운 요청은 스크립트 경로를 말하지
+          않습니다 — 그래서 **빌더가 스스로 만든 스크립트는 한 번도 검사된 적이
+          없었습니다.** v1.11.18의 코인 실행이 `CompareTag("Coin")`을 담은 채
+          `verified`로 나간 것이 그 결과입니다(프로젝트 태그가 비어 있어 트리거가
+          걸리는 순간 예외를 던집니다). 기록된 실행 109개의 빌더 산출 스크립트
+          158개를 재생하니 **위반 41건**이 나왔고, 현재 규칙이 다 들어간 7/29 이후로
+          좁히면 78개 중 5건 — **전부 미정의 태그, 오탐 0**입니다. 검사 대상에 이
+          세션이 쓴 스크립트를 넣고, 수정 안내는 "분기를 삭제하라"에서 **마커
+          컴포넌트로 조건만 바꾸라**로 고쳤습니다(삭제하면 사용자가 요청한 기능이
+          사라집니다).
+          상세: [docs/v1.11.19_lint_scope_for_builder_scripts.md](docs/v1.11.19_lint_scope_for_builder_scripts.md)

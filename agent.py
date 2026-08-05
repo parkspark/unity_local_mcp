@@ -639,7 +639,13 @@ class Agent:
 
     async def _collect_verification(self, spec: VerificationSpec) -> VerificationContract:
         """Collect a fixed evidence sequence without giving a model completion authority."""
-        contract = VerificationContract(spec, config.UNITY_PROJECT_DIR)
+        contract = VerificationContract(
+            spec,
+            config.UNITY_PROJECT_DIR,
+            # 이 세션이 실제로 쓴 스크립트. 정적 검사가 요청에 적힌 경로 밖을
+            # 보지 못하던 공백을 메운다.
+            session_scripts=set(self.known_session_scripts),
+        )
         if hasattr(self.tools, "set_tool_mode"):
             self.tools.set_tool_mode("verify")
         self._active_tool_mode = "verify"
