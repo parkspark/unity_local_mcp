@@ -1921,6 +1921,26 @@ class ContactCandidateRecordingTests(unittest.TestCase):
         )
         self.assertIsNone(contract.contact_report()[0]["nearest_player_distance"])
 
+    def test_structural_objects_are_separated_from_interaction_targets(self):
+        """첫 15건 표본에서 바닥·발판이 코인과 섞여 거리 분포를 읽을 수 없었다.
+
+        붙은 스크립트가 둘을 가른다 — 코인은 마커를 갖고 바닥은 갖지 않는다.
+        """
+        contract = self._contract(
+            {"Coin_1": {"position": (2.0, 2.0, 0.0), "active": True, "missing": False},
+             "Ground": {"position": (0.0, -0.5, 0.0), "active": True, "missing": False}},
+            {},
+        )
+        contract.observe("unity_get_hierarchy", {}, hierarchy(
+            *DEFAULTS,
+            obj("Player", "Transform", "MeshRenderer", "Rigidbody"),
+            obj("Coin_1", "Transform", "MeshFilter", "MeshRenderer", "BoxCollider", "Coin"),
+            obj("Ground", "Transform", "MeshFilter", "MeshRenderer", "BoxCollider"),
+        ))
+        by_name = {c["object"]: c for c in contract.contact_report()}
+        self.assertEqual(by_name["Coin_1"]["scripts"], ["Coin"])
+        self.assertEqual(by_name["Ground"]["scripts"], [])
+
     def test_recording_never_changes_the_verdict(self):
         """A0는 아직 검사가 아니다. 기록이 실패를 만들면 규칙을 어기는 것이다."""
         recorded = self._contract(

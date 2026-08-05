@@ -996,8 +996,31 @@ class VerificationContract:
                     None if distance is None else round(distance, 3)
                 ),
                 "disappeared": gone,
+                # 후보 대부분은 상호작용 대상이 아니라 구조물이다(Ground, Floor,
+                # Platform, FlagPole). 첫 15건 표본에서 그 둘이 섞여 거리 분포를
+                # 읽을 수 없었다. 붙은 스크립트가 그 둘을 가른다 — 코인·아이템은
+                # 마커나 동작 스크립트를 갖고, 바닥은 갖지 않는다.
+                "scripts": self._object_scripts(name),
             })
         return report
+
+    # Unity가 기본으로 붙이는 것들. 이것만 있으면 구조물이다.
+    _BUILTIN_COMPONENTS = frozenset({
+        "transform", "meshfilter", "meshrenderer", "boxcollider", "spherecollider",
+        "capsulecollider", "meshcollider", "rigidbody", "camera", "audiolistener",
+        "light", "universaladditionallightdata", "recttransform",
+    })
+
+    def _object_scripts(self, name: str) -> list[str]:
+        """이 오브젝트에 붙은 사용자 스크립트 이름."""
+        node = self._find_node(name)
+        components = (node or {}).get("components")
+        if not isinstance(components, list):
+            return []
+        return [
+            str(item) for item in components
+            if str(item).lower().split(".")[-1] not in self._BUILTIN_COMPONENTS
+        ]
 
     def _find_node(self, name: str) -> dict | None:
         """Locate one object anywhere in the observed hierarchy."""

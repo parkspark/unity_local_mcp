@@ -10,7 +10,7 @@
 ![alt text](data/0703_unity_mcp1.gif)
 
 
-로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.23**이다.
+로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.24**이다.
 기존 [unity_mcp](../unity_mcp) MCP 서버와 Unity 브리지를 재사용하고
 (v1.7부터 send_key 등 일부 확장), Claude Code의 자리를 로컬 모델이 대신한다.
 
@@ -612,3 +612,13 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           `0.071(사라짐) / 2.052 / 2.072`로 깔끔하게 갈렸습니다. 판정에는 들어가지
           않습니다.
           상세: [docs/v1.11.23_contact_candidate_recording.md](docs/v1.11.23_contact_candidate_recording.md)
+
+- ver 1.11.24 - **거리 분포를 모아 보니 검사를 만들 때가 아니었습니다.** 요청 형태 넷을
+          돌려 접촉 후보 15건을 모았는데(사라진 것 1건 0.071, 남은 것 14건 0.377~3.0),
+          임계값을 고르지 못했습니다 — ① **후보의 절반이 상호작용 대상이 아니라**
+          바닥·발판이고(늘 가까이 있으니 낮은 쪽을 채웁니다), ② `GoalFlag`처럼
+          **사라지지 않는 게 정상**인 요청이 있고, ③ "위에서 밟으면"처럼 **호스트가
+          만들지 않는 접촉**이 있습니다. ①의 재료로 후보마다 붙은 사용자 스크립트를
+          기록에 넣었습니다(코인은 마커를 갖고 바닥은 갖지 않습니다). 분포가 아니라
+          **분포를 읽을 수 없는 이유**가 이 사이클의 결과입니다.
+          상세: [docs/v1.11.24_contact_distance_distribution.md](docs/v1.11.24_contact_distance_distribution.md)
