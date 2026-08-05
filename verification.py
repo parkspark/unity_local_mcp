@@ -953,14 +953,54 @@ class VerificationContract:
                 best = (name, moved)
         return best
 
+    def player_paths(self) -> list[tuple]:
+        """플레이어가 실제로 통과한 구간들. 점이 아니라 선분이다.
+
+        표본은 측정 구간의 양 끝에서만 찍힌다. D 측정의 `(0,1,0) → (4.95,1,0)`은
+        남지만 그 사이를 지나간 `(2,1,0)`은 남지 않아, 코인 바로 아래를 지나가고도
+        거리가 2.05로 기록됐다(실제 수직 거리 1.0).
+
+        **아무 표본끼리 이으면 안 된다.** 측정 구간 사이에는 `restart_play()`로
+        플레이어가 스폰으로 되돌아가므로, 그 둘을 선분으로 이으면 실제로 지나가지
+        않은 경로를 지어내게 된다. 그래서 "한 번의 연속 이동"이 보장된 쌍만 쓴다.
+        """
+        paths = []
+        for label, before in self.motion_before.items():
+            after = self.motion_after.get(label)
+            if after is not None:
+                paths.append((before, after))
+        # 점프는 같은 X에서 수직으로 오르내린 구간이다.
+        if self.jump_before is not None and self.jump_peak_y is not None:
+            paths.append((
+                self.jump_before,
+                (self.jump_before[0], self.jump_peak_y, self.jump_before[2]),
+            ))
+        return paths
+
+    @staticmethod
+    def _distance_to_segment(pos, start, end) -> float:
+        span = tuple(e - s for e, s in zip(end, start))
+        length2 = sum(v * v for v in span)
+        if length2 <= 1e-12:
+            return sum((p - s) ** 2 for p, s in zip(pos, start)) ** 0.5
+        t = sum((p - s) * v for p, s, v in zip(pos, start, span)) / length2
+        t = max(0.0, min(1.0, t))
+        closest = tuple(s + t * v for s, v in zip(start, span))
+        return sum((p - c) ** 2 for p, c in zip(pos, closest)) ** 0.5
+
     def nearest_player_distance(self, pos) -> float | None:
         """이 좌표에 플레이어가 가장 가까이 왔던 거리."""
-        if pos is None or not self.player_samples:
+        if pos is None:
             return None
-        return min(
+        candidates = [
+            self._distance_to_segment(pos, start, end)
+            for start, end in self.player_paths()
+        ]
+        candidates += [
             sum((a - b) ** 2 for a, b in zip(pos, sample)) ** 0.5
             for sample in self.player_samples
-        )
+        ]
+        return min(candidates) if candidates else None
 
     def contact_report(self) -> list[dict]:
         """접촉 반응의 재료. 판정하지 않고 거리만 남긴다.

@@ -10,7 +10,7 @@
 ![alt text](data/0703_unity_mcp1.gif)
 
 
-로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.24**이다.
+로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.25**이다.
 기존 [unity_mcp](../unity_mcp) MCP 서버와 Unity 브리지를 재사용하고
 (v1.7부터 send_key 등 일부 확장), Claude Code의 자리를 로컬 모델이 대신한다.
 
@@ -622,3 +622,13 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           기록에 넣었습니다(코인은 마커를 갖고 바닥은 갖지 않습니다). 분포가 아니라
           **분포를 읽을 수 없는 이유**가 이 사이클의 결과입니다.
           상세: [docs/v1.11.24_contact_distance_distribution.md](docs/v1.11.24_contact_distance_distribution.md)
+
+- ver 1.11.25 - **점이 아니라 경로로 잽니다.** 접촉 거리 표본이 측정 구간의 **양 끝점만**
+          담아, 코인 바로 아래를 통과하고도 거리가 2.052로 기록됐습니다(실제 수직 거리
+          1.0) — A0가 잡으려는 "지나갔는데 반응이 없다"를 정면으로 막는 결함이었습니다.
+          측정 구간을 선분으로 다루되, `restart_play`로 스폰에 되돌아가는 구간 사이를
+          잇지 않도록 **연속 이동이 보장된 쌍만** 씁니다. 아울러 오프라인 복원으로 얻었던
+          극적인 수치(`Item` 0.001)는 **시작 좌표를 가정한 허수**였음을 라이브로 확인해
+          정정했습니다(실제 0.773~1.21). 그리고 이 수집 중 Ollama가 끊기면서
+          **v1.11.20의 `repair_aborted`가 처음 발동해 측정 3건이 영수증에 보존**됐습니다.
+          상세: [docs/v1.11.25_segment_distance_and_repair_abort.md](docs/v1.11.25_segment_distance_and_repair_abort.md)

@@ -1921,6 +1921,47 @@ class ContactCandidateRecordingTests(unittest.TestCase):
         )
         self.assertIsNone(contract.contact_report()[0]["nearest_player_distance"])
 
+    def test_the_middle_of_a_sweep_counts_as_visited(self):
+        """표본은 구간 양 끝에만 찍힌다. 점만 보면 지나간 곳을 놓친다.
+
+        실측: 코인 (2, 2, 0) 바로 아래를 지나갔는데 거리가 2.052로 기록됐다.
+        D 측정의 (0,1,0) → (4.95,1,0)을 선분으로 보면 수직 거리 1.0이다.
+        """
+        contract = self._contract(
+            {"Coin_1": {"position": (2.0, 2.0, 0.0), "active": True, "missing": False}},
+            {},
+            samples=(),
+        )
+        contract.motion_before["d"] = (0.0, 1.0, 0.0)
+        contract.motion_after["d"] = (4.95, 1.0, 0.0)
+        self.assertAlmostEqual(
+            contract.contact_report()[0]["nearest_player_distance"], 1.0, places=3
+        )
+
+    def test_separate_measurements_are_not_joined_into_a_fake_path(self):
+        """구간 사이에는 restart_play로 스폰에 되돌아간다.
+
+        D 측정의 끝과 A 측정의 시작을 이으면 실제로 지나가지 않은 경로가 생긴다.
+        """
+        contract = self._contract({}, {}, samples=())
+        contract.motion_before["d"] = (0.0, 1.0, 0.0)
+        contract.motion_after["d"] = (5.0, 1.0, 0.0)
+        contract.motion_before["a"] = (0.0, 1.0, 0.0)
+        contract.motion_after["a"] = (-5.0, 1.0, 0.0)
+        paths = contract.player_paths()
+        self.assertIn(((0.0, 1.0, 0.0), (5.0, 1.0, 0.0)), paths)
+        self.assertIn(((0.0, 1.0, 0.0), (-5.0, 1.0, 0.0)), paths)
+        # (5,1,0) → (0,1,0) 같은 지어낸 연결이 없어야 한다
+        self.assertEqual(len(paths), 2)
+
+    def test_the_jump_arc_is_a_vertical_segment(self):
+        contract = self._contract({}, {}, samples=())
+        contract.jump_before = (3.0, 1.0, 0.0)
+        contract.jump_peak_y = 6.0
+        self.assertEqual(
+            contract.player_paths(), [((3.0, 1.0, 0.0), (3.0, 6.0, 0.0))]
+        )
+
     def test_structural_objects_are_separated_from_interaction_targets(self):
         """첫 15건 표본에서 바닥·발판이 코인과 섞여 거리 분포를 읽을 수 없었다.
 
