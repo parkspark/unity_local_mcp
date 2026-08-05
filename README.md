@@ -10,7 +10,7 @@
 ![alt text](data/0703_unity_mcp1.gif)
 
 
-로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.21**이다.
+로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.22**이다.
 기존 [unity_mcp](../unity_mcp) MCP 서버와 Unity 브리지를 재사용하고
 (v1.7부터 send_key 등 일부 확장), Claude Code의 자리를 로컬 모델이 대신한다.
 
@@ -590,3 +590,13 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           영수증은 **하나**(D +2.06 / A −5.05로 막힌 배치가 통과했던 실행)입니다.
           양쪽이 같이 실패하는 입력 결함과 폭주 물리는 배제 조건으로 갈라 뒀습니다.
           상세: [docs/v1.11.21_movement_path_blocked.md](docs/v1.11.21_movement_path_blocked.md)
+
+- ver 1.11.22 - **결함을 주입해 실패 경로를 실측했습니다.** 검사 세 개가 "탐지는 재생으로
+          확인했지만 실제로 발동하고 repair가 고치는지는 안 봤다"로 남아 있었습니다.
+          벽을 세우고(`movement_path_blocked`), 렌더러를 떼고(`player_has_no_renderer`),
+          순찰 컴포넌트를 떼서(`no_object_moved_on_its_own`) 돌린 결과 **셋 다 탐지되고
+          1사이클 repair로 복구**됐습니다. 특히 벽 주입에서 **repair가 스크립트를 한 줄도
+          건드리지 않고 오브젝트를 위로 옮겼습니다** — v1.11.21이 겨냥한 바로 그
+          행동입니다. `autonomous_motion` 재현성 표본도 3건(1.6458 / 1.7016 / 1.7001)이
+          됐습니다. 코드 변경은 없습니다.
+          상세: [docs/v1.11.22_injected_failure_paths.md](docs/v1.11.22_injected_failure_paths.md)
