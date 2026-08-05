@@ -10,7 +10,7 @@
 ![alt text](data/0703_unity_mcp1.gif)
 
 
-로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.25**이다.
+로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.26**이다.
 기존 [unity_mcp](../unity_mcp) MCP 서버와 Unity 브리지를 재사용하고
 (v1.7부터 send_key 등 일부 확장), Claude Code의 자리를 로컬 모델이 대신한다.
 
@@ -632,3 +632,15 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           정정했습니다(실제 0.773~1.21). 그리고 이 수집 중 Ollama가 끊기면서
           **v1.11.20의 `repair_aborted`가 처음 발동해 측정 3건이 영수증에 보존**됐습니다.
           상세: [docs/v1.11.25_segment_distance_and_repair_abort.md](docs/v1.11.25_segment_distance_and_repair_abort.md)
+
+- ver 1.11.26 - **모르는 인자를 버리고 성공을 돌려주고 있었습니다.** 접촉 표본을 찾다가
+          아이템이 플레이어 경로 바로 위에 있는데도 획득되지 않는 씬을 만났습니다.
+          획득 코드는 `CompareTag("Player")`인데 **Player의 태그가 `Untagged`**였고,
+          모델이 태그를 설정하려 보낸 `unity_modify_gameobject {tag: "Player"}`는
+          **그 도구에 `tag` 파라미터가 없어 조용히 버려지고 `{"status":"ok"}`가
+          돌아왔습니다.** 이 세션에는 태그를 설정하는 도구가 아예 없어서, 기록된 실행
+          중 **골인 판정·적 처치·아이템 획득 4건이 전부 같은 방식으로 죽어** 있었고
+          호스트는 그것을 볼 검사가 없어 `verified`를 냈습니다. 이제 스키마에 없는
+          인자는 **브리지에 보내지 않고 거절**하며, "실행되지 않았다"와 대안(마커
+          컴포넌트)을 함께 알려줍니다.
+          상세: [docs/v1.11.26_silent_argument_drop.md](docs/v1.11.26_silent_argument_drop.md)

@@ -162,6 +162,68 @@ class HostFileToolIdentityTests(unittest.TestCase):
         tools._call_once = ping
         return tools
 
+    def test_an_argument_the_tool_does_not_accept_is_refused_not_dropped(self):
+        """모르는 인자를 버리고 성공을 돌려주면 모델이 하지도 않은 일을 믿는다.
+
+        2026-08-05 실측: `unity_modify_gameobject {target: "Player",
+        tag: "Player"}`가 `{"status":"ok"}`를 받았는데 태그는 붙지 않았다. 그
+        도구에 `tag` 파라미터가 없다. 모델은 태그를 설정했다고 믿고
+        `CompareTag("Player")`로 분기하는 코인 획득 코드를 썼고, 그 분기는
+        영원히 거짓이었다.
+        """
+        with tempfile.TemporaryDirectory() as project:
+            tools = self._tools(project, project)
+            tools._schemas = {"unity_modify_gameobject": {"properties": {
+                "target": {}, "name": {}, "position": {},
+            }}}
+            called = []
+
+            async def spy(name, args):
+                called.append((name, args))
+                return json.dumps({"status": "ok", "result": {}}, ensure_ascii=False)
+
+            tools._call_once = spy
+            with mock.patch.object(config, "UNITY_PROJECT_DIR", project):
+                text = asyncio.run(tools.call(
+                    "unity_modify_gameobject", {"target": "Player", "tag": "Player"}
+                ))
+
+            payload = json.loads(text)
+            self.assertEqual(payload["status"], "error")
+            self.assertIn("tag", payload["error"])
+            self.assertIn("marker component", payload["error"])
+            # 브리지까지 가지 않아야 한다 — 조용한 성공이 문제였으므로
+            self.assertEqual(called, [])
+
+    def test_accepted_arguments_still_go_through(self):
+        with tempfile.TemporaryDirectory() as project:
+            tools = self._tools(project, project)
+            tools._schemas = {"unity_modify_gameobject": {"properties": {
+                "target": {}, "position": {},
+            }}}
+            called = []
+
+            async def spy(name, args):
+                called.append((name, args))
+                return json.dumps({"status": "ok", "result": {}}, ensure_ascii=False)
+
+            tools._call_once = spy
+            with mock.patch.object(config, "UNITY_PROJECT_DIR", project):
+                asyncio.run(tools.call(
+                    "unity_modify_gameobject",
+                    {"target": "Wall", "position": [1, 2, 3]},
+                ))
+            self.assertEqual(len(called), 1)
+
+    def test_an_unknown_schema_does_not_block_anything(self):
+        """스키마가 아직 없을 때(세션 연결 전) 모르는 것을 근거로 막지 않는다."""
+        with tempfile.TemporaryDirectory() as project:
+            tools = self._tools(project, project)
+            self.assertEqual(
+                tools.unknown_arguments("unity_modify_gameobject", {"tag": "Player"}),
+                [],
+            )
+
     def test_write_script_is_refused_when_the_editor_is_on_another_project(self):
         with tempfile.TemporaryDirectory() as expected, tempfile.TemporaryDirectory() as actual:
             tools = self._tools(expected, actual)

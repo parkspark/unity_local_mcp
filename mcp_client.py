@@ -484,6 +484,31 @@ class UnityTools:
             fixed[key] = value
         return fixed
 
+    def unknown_arguments(self, name: str, args: dict) -> list[str]:
+        """이 도구가 받지 않는 인자 이름들.
+
+        2026-08-05 실측: 모델이 `unity_modify_gameobject {target: "Player",
+        tag: "Player"}`를 보냈고 `{"status":"ok"}`가 돌아왔는데 **태그는 붙지
+        않았다.** 그 도구에는 `tag` 파라미터가 없다(active·name·parent·position·
+        rotation·scale·target뿐). 모르는 인자가 조용히 버려지고 성공이 반환된
+        것이다.
+
+        모델은 태그를 설정했다고 믿고 `CompareTag("Player")`로 분기하는 코드를
+        쓴다. 그 분기는 영원히 거짓이고, 코인 획득·골인 판정이 통째로 죽는다.
+        기록된 실행 넷이 이 방식으로 태그를 "설정"했다.
+
+        스키마를 이미 갖고 있으므로(`self._schemas`) 판별은 공짜다.
+        """
+        # 스키마는 MCP 세션이 연결된 뒤에 채워진다. 아직 없으면 판별할 수 없으므로
+        # 통과시킨다 — 모르는 것을 근거로 막지 않는다.
+        schema = getattr(self, "_schemas", {}).get(name)
+        if not schema:
+            return []
+        props = schema.get("properties")
+        if not isinstance(props, dict) or schema.get("additionalProperties") is True:
+            return []
+        return sorted(key for key in args if key not in props)
+
     async def _call_once(self, name: str, args: dict) -> str:
         try:
             result = await self.session.call_tool(name, args)
@@ -497,6 +522,23 @@ class UnityTools:
         return text
 
     async def _call_impl(self, name: str, args: dict) -> str:
+        # 모르는 인자를 조용히 버리고 성공을 돌려주면, 모델은 하지도 않은 일을
+        # 했다고 믿는다. 태그가 그렇게 죽었다 — 아래 목록을 이름으로 돌려줘서
+        # 모델이 "그 도구로는 안 되는구나"를 알게 한다.
+        unknown = self.unknown_arguments(name, args)
+        if unknown:
+            allowed = sorted(self._schemas.get(name, {}).get("properties", {}))
+            return json.dumps({
+                "status": "error",
+                "error": (
+                    f"{name} does not accept {', '.join(unknown)}. "
+                    f"Accepted parameters: {', '.join(allowed)}. "
+                    "The call was NOT executed — nothing changed. There is no tool "
+                    "that sets a GameObject tag; identify objects with a marker "
+                    "component and GetComponent<T>() instead."
+                ),
+            }, ensure_ascii=False)
+
         if self.tool_mode == "verify" and name not in VERIFY_ONLY_TOOLS:
             return json.dumps({
                 "status": "error",
