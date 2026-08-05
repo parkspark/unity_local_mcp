@@ -10,7 +10,7 @@
 ![alt text](data/0703_unity_mcp1.gif)
 
 
-로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.19**이다.
+로컬 LLM(Ollama)으로 Unity Editor를 제어하는 채팅 CLI. 현재 버전은 **v1.11.20**이다.
 기존 [unity_mcp](../unity_mcp) MCP 서버와 Unity 브리지를 재사용하고
 (v1.7부터 send_key 등 일부 확장), Claude Code의 자리를 로컬 모델이 대신한다.
 
@@ -567,3 +567,15 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           컴포넌트로 조건만 바꾸라**로 고쳤습니다(삭제하면 사용자가 요청한 기능이
           사라집니다).
           상세: [docs/v1.11.19_lint_scope_for_builder_scripts.md](docs/v1.11.19_lint_scope_for_builder_scripts.md)
+
+- ver 1.11.20 - **라이브 확인 한 번이 결함 둘을 드러냈다.** v1.11.19를 실측하러 코인
+          요청을 돌렸고 **2회 모두 미정의 태그를 잡았습니다** — 모델이 코인 로직을
+          별도 파일로 빼도 검사 대상이 "세션이 쓴 스크립트 전체"라 빠져나가지
+          못했습니다. 그 과정에서 ① repair 중 Ollama 호출이 끊기자 **이미 끝난
+          측정이 영수증째 사라졌고**(기록된 166건 중 4건이 같은 방식으로 유실),
+          ② repair가 태그 위반을 고쳤는데 **롤백이 위반이 남은 상태로 되돌렸습니다.**
+          원인은 `player_movement_not_measured` 같은 **측정 공백을 결함으로 두 번
+          센 것**이었고(첫 키가 이미 세고 있었습니다), 그래서 전부 blocked된 상태가
+          더 좋아 보였습니다. 다중 사이클 영수증 53건을 재생해 **선택이 바뀐 것은
+          1건 — 이 결함을 드러낸 그 실행뿐**입니다.
+          상세: [docs/v1.11.20_receipt_survival_and_rollback_score.md](docs/v1.11.20_receipt_survival_and_rollback_score.md)

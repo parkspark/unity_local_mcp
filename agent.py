@@ -46,6 +46,7 @@ Rules:
 - A camera is NOT a primitive. Never create one with unity_create_gameobject primitive="Cube" — that makes a cube named "Main Camera" that renders nothing. If you must build it by hand, create the object with no primitive (`{"name": "Main Camera", "position": [0, 5, -10]}`) and then unity_add_component component_type="Camera".
 - A tag only exists if the project defines it. In a scene you just created, `CompareTag("Ground")` and `tag = "Ground"` throw `Tag: Ground is not defined` at runtime. Decide ground contact from the collision normal (`Vector3.Dot(contact.normal, Vector3.up) > 0.5f`) instead of from a tag.
 - To tell WHICH object you touched (a coin, an enemy, a goal), use a marker component, never a tag. Write a one-line `public class Coin : MonoBehaviour {}`, add it to those objects with unity_add_component, and test with `if (other.GetComponent<Coin>() != null)`. This needs no project tag, cannot throw at runtime, and survives renaming. The collision normal only tells you the direction of a hit, not the identity of what was hit.
+- A script that reads its own Rigidbody (`GetComponent<Rigidbody>()`, `rb.linearVelocity`) should declare `[RequireComponent(typeof(Rigidbody))]` above the class. Unity then attaches the Rigidbody itself when the script is added, so the object cannot end up with the script but no body — that gap throws `MissingComponentException` from FixedUpdate on every physics tick and the game never moves. The same applies to any component the script fetches from its own GameObject.
 - An object that must move on its own (a patrolling enemy, a moving platform) needs BOTH the script and the component actually attached to that object. Writing PatrolX.cs and never calling unity_add_component on the enemy leaves it standing still; the host measures this with no input given.
 
 Writing C# scripts:
@@ -969,17 +970,32 @@ class Agent:
         Used only to decide which cycle's files to keep, never to declare
         success — an empty failure list is still what verification requires.
         """
+        requested = set(requested_checks or ())
+        measured = set(measured_checks or ())
+        unmeasured_checks = requested - measured
         state, blocked = 0, 0
         for item in failures:
-            if item in cls._ORCHESTRATION_MARKERS:
+            # `repair_aborted:<예외명>`은 접미사가 붙으므로 집합 비교로는 걸리지
+            # 않는다. 이것도 프로젝트 파일의 결함이 아니라 루프 제어 결과다.
+            if item in cls._ORCHESTRATION_MARKERS or item.startswith("repair_aborted:"):
                 continue
             if item.startswith("blocked:"):
                 blocked += 1
-            else:
-                state += 1
-        requested = set(requested_checks or ())
-        measured = set(measured_checks or ())
-        unmeasured = len(requested - measured) if requested else 0
+                continue
+            # `player_movement_not_measured`처럼 "재지 못했다"는 실패는 결함이
+            # 아니라 측정 공백이고, 그 공백은 이미 첫 키에 세어져 있다. 두 번 세면
+            # 측정을 시도한 상태가 전부 blocked된 상태보다 나빠 보인다 — 아래
+            # 주석이 막겠다고 적어 둔 바로 그 역전이다.
+            #
+            # 2026-08-05 실행이 그 역전을 실제로 냈다. repair가 태그 위반을
+            # 고쳤는데(reverify: 실제 결함 0, blocked 0), 롤백이 위반이 남은
+            # verify 1(실제 결함 2, blocked 12)로 되돌렸다. 미측정 4는 양쪽이
+            # 같았고, 되돌린 근거가 이중 계산된 5건이었다.
+            name = failure_check_name(item)
+            if name is not None and name in unmeasured_checks:
+                continue
+            state += 1
+        unmeasured = len(unmeasured_checks) if requested else 0
         # A blocked state with no observed defects is not better than a state
         # where those same checks ran and exposed actionable failures.
         return unmeasured, state, blocked
@@ -1155,6 +1171,23 @@ class Agent:
             except asyncio.TimeoutError:
                 failures.append("task_time_budget_exhausted")
                 self._log("verification_fix_timeout", cycle=cycle, timeout=remaining)
+                break
+            except Exception as error:
+                # 이미 끝난 측정을 모델 호출 하나 때문에 버리지 않는다. 2026-08-05
+                # 실행에서 검증이 `undefined_compare_tag:...:Coin`을 정확히 잡아
+                # 놓고, repair 첫 사이클의 Ollama 호출이 끊기자(`XML syntax error
+                # ... unexpected EOF`) 예외가 영수증 기록 지점을 건너뛰어 그
+                # 측정이 통째로 사라졌다. 기록된 실행 166개 중 4건이 같은 방식으로
+                # 완료된 측정을 잃었다.
+                failures.append(f"repair_aborted:{type(error).__name__}")
+                self._log(
+                    "verification_fix_aborted", cycle=cycle,
+                    exception_type=type(error).__name__, message=str(error),
+                )
+                self.on_warn(
+                    f"자동 수정이 중단됐습니다({type(error).__name__}). "
+                    "지금까지의 측정은 영수증에 남깁니다."
+                )
                 break
             self._log(
                 "verification_fix_finished", cycle=cycle, model_loop_ok=fix_ok,

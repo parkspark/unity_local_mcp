@@ -1443,6 +1443,10 @@ _FAILURE_CHECK_PREFIXES = (
     ("screenshot_file_missing", "screenshot"),
     ("runtime_errors:", "gameplay"),
     ("play_mode_not_tested", "gameplay"),
+    # "런타임을 재지 못했다"도 gameplay 검사에 속한다. 매핑이 없으면 롤백 점수가
+    # 이것을 프로젝트 결함으로 세고, 같은 공백을 미측정 키와 함께 두 번 센다.
+    ("runtime_console_not_checked", "gameplay"),
+    ("runtime_wait_missing", "gameplay"),
 )
 
 # Failure codes that carry a magnitude. Fewer errors than before is progress,

@@ -1092,6 +1092,60 @@ class RegressionDetectionTests(unittest.TestCase):
         self.assertEqual(agent.cycles_run, 2)
 
 
+class RepairAbortTests(unittest.TestCase):
+    """모델 호출 하나가 끊겨 완료된 측정이 통째로 사라졌다.
+
+    2026-08-05 실행에서 검증이 `undefined_compare_tag:...:Coin`을 정확히 잡아
+    놓고, repair 첫 사이클의 Ollama 호출이 끊기자(`XML syntax error ... unexpected
+    EOF`) 예외가 영수증 기록 지점을 건너뛰었다. 기록된 실행 166개 중 4건이 같은
+    방식으로 완료된 측정을 잃었다.
+    """
+
+    class _Exploding(ScriptedVerificationAgent):
+        async def _react_loop(self, messages, contract, max_iters, ledger=None):
+            raise RuntimeError("XML syntax error on line 3: unexpected EOF")
+
+    def _run(self):
+        spec = VerificationSpec.from_request("점프를 고쳐줘")
+        agent = self._Exploding(
+            [StubContract(["player_did_not_jump"], ["gameplay", "jump"])]
+        )
+        with tempfile.TemporaryDirectory() as project, \
+             tempfile.TemporaryDirectory() as receipts, \
+             mock.patch.object(config, "UNITY_PROJECT_DIR", project), \
+             mock.patch.object(config, "VERIFICATION_RECEIPT_DIR", receipts):
+            success = asyncio.run(
+                agent._run_verification_orchestration(spec, None, time.monotonic(), True)
+            )
+            with open(agent.last_verification_receipt_path, encoding="utf-8") as handle:
+                return success, json.load(handle)
+
+    def test_the_measurement_survives_a_dead_model_call(self):
+        success, receipt = self._run()
+        self.assertFalse(success)
+        # 예외 전에 끝난 측정이 그대로 남아 있어야 한다
+        self.assertEqual(receipt["measured_checks"], ["gameplay", "jump"])
+        self.assertIn("player_did_not_jump", receipt["failures"])
+
+    def test_the_abort_is_named_in_the_receipt(self):
+        _, receipt = self._run()
+        self.assertIn("repair_aborted:RuntimeError", receipt["failures"])
+
+    def test_the_abort_is_not_counted_as_a_project_defect(self):
+        """롤백 판정이 이것을 결함으로 세면 멀쩡한 사이클을 되돌린다."""
+        scored = Agent._repair_score(
+            ["repair_aborted:RuntimeError", "player_did_not_jump"],
+            measured_checks=["gameplay", "jump"],
+            requested_checks=["gameplay", "jump"],
+        )
+        only_defect = Agent._repair_score(
+            ["player_did_not_jump"],
+            measured_checks=["gameplay", "jump"],
+            requested_checks=["gameplay", "jump"],
+        )
+        self.assertEqual(scored, only_defect)
+
+
 class RepairRollbackTests(unittest.TestCase):
     """P1: 자동 수정이 상태를 악화시키면 최선 상태로 되돌린다.
 
@@ -1180,6 +1234,45 @@ class RepairRollbackTests(unittest.TestCase):
                     Agent._repair_score(["player_did_not_jump", marker]),
                     Agent._repair_score(["player_did_not_jump"]),
                 )
+
+    def test_unmeasured_checks_are_not_counted_twice(self):
+        """"재지 못했다"는 실패는 결함이 아니라 측정 공백이고 첫 키가 이미 센다.
+
+        2026-08-05 실행(영수증 20260805_102127)에서 두 번 세는 바람에 롤백이
+        역전됐다. repair가 정책 위반을 고친 상태(실제 결함 0 · blocked 0)를 두고,
+        위반이 남고 12개가 blocked된 최초 상태로 되돌렸다 — 되돌린 근거가
+        `player_movement_not_measured` 류 5건이었고 그것들은 미측정 4에 이미
+        포함돼 있었다.
+        """
+        requested = ["gameplay", "movement", "bidirectional", "jump"]
+        measured = []          # 아무것도 못 쟀다 — 미측정 4
+        gaps = [
+            "runtime_console_not_checked", "player_movement_not_measured",
+            "d_movement_not_measured", "a_movement_not_measured",
+            "player_jump_not_measured",
+        ]
+        self.assertEqual(
+            Agent._repair_score(gaps, measured, requested),
+            Agent._repair_score([], measured, requested),
+        )
+
+    def test_a_repaired_state_beats_one_that_still_violates_policy(self):
+        """실측된 역전 그대로 — 고쳐진 쪽이 이겨야 한다."""
+        requested = ["gameplay", "movement", "bidirectional", "jump"]
+        measured = []
+        before = Agent._repair_score(
+            ["policy_lint:undefined_compare_tag:Assets/Scripts/CoinCollector.cs:Coin"]
+            + [f"blocked:{stage}:policy_lint_failed"
+               for stage in ("gameplay", "movement", "jump", "boost")],
+            measured, requested,
+        )
+        after = Agent._repair_score(
+            ["runtime_console_not_checked", "player_movement_not_measured",
+             "d_movement_not_measured", "a_movement_not_measured",
+             "player_jump_not_measured"],
+            measured, requested,
+        )
+        self.assertLess(after, before)
 
     def test_score_prefers_more_measured_state_on_a_tie(self):
         self.assertLess(
