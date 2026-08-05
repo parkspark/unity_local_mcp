@@ -832,6 +832,26 @@ class Agent:
                     elif contract.idle_after[1] < contract.idle_before[1] - 2:
                         for stage in ("movement", "jump", "boost", "camera"):
                             contract.block(stage, "player_fell_during_spawn_check")
+                async def sample_objects(store: dict) -> None:
+                    """비-Player 오브젝트의 위치·활성 상태를 한 번 훑는다.
+
+                    접촉 반응(코인 획득, 적 처치)은 오브젝트를 없애거나 비활성화하므로,
+                    이동 측정 전후로 이것을 재면 무슨 일이 일어났는지 남는다. 판정에는
+                    쓰지 않고 영수증에만 남긴다 — 검사로 만들기 전에 실측이 필요하다.
+                    """
+                    for target in contract.autonomous_candidates():
+                        result = await self._verification_call(
+                            contract, "unity_get_gameobject", {"target": target}
+                        )
+                        missing = '"status":"error"' in str(result).replace(" ", "")
+                        store[target] = {
+                            "position": contract.latest_positions.get(target.lower()),
+                            "active": contract.latest_active.get(target.lower()),
+                            "missing": missing,
+                        }
+
+                if spec.require_gameplay and await confirm_play_active():
+                    await sample_objects(contract.contact_before)
                 if spec.require_autonomous_motion and await confirm_play_active():
                     # 입력을 주기 전에 잰다. 이동 측정이 시작되면 물리와 충돌로
                     # 다른 오브젝트도 밀려나므로, 스스로 움직인 것인지 밀린 것인지
@@ -924,6 +944,11 @@ class Agent:
                     })
                 if spec.require_movement or spec.require_jump or spec.require_boost:
                     await self._verification_call(contract, "unity_get_input_state", {})
+                # 이동·점프 측정이 끝난 뒤 같은 오브젝트를 다시 훑는다. 그 사이에
+                # 플레이어가 지나간 구간은 contract.player_sweep()이 알고 있으므로,
+                # "닿았어야 하는데 그대로인가"를 사후에 따질 수 있다.
+                if contract.contact_before and await confirm_play_active():
+                    await sample_objects(contract.contact_after)
         except (TypeError, ValueError, AttributeError, KeyError) as error:
             self._log(
                 "verification_collection_error",

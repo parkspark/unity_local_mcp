@@ -134,6 +134,10 @@ _AUTONOMOUS_WORDS = (
 # 한쪽 이동이 반대쪽의 이 비율에 못 미치면 그 방향이 막힌 것으로 본다. 기록된
 # 119건의 분포에서 정상은 0.96 이상, 막힌 것은 0.42 이하이고 그 사이가 비어 있다.
 _BLOCKED_PATH_RATIO = 0.5
+# 접촉 판단의 여유. 플레이어 캡슐 반지름 0.5와 코인 반쪽 크기를 합친 정도이고,
+# 높이는 캡슐 높이 2를 기준으로 잡았다. 기록 전용이라 아직 판정에 쓰지 않는다.
+_CONTACT_MARGIN = 1.0
+_CONTACT_HEIGHT = 1.5
 # 새 씬이 기본으로 갖는 오브젝트. 이것만 남아 있으면 아무것도 만들어지지 않았다.
 _DEFAULT_SCENE_OBJECTS = frozenset({
     "main camera", "directional light", "global volume",
@@ -691,6 +695,7 @@ class VerificationContract:
     observed_components: dict[str, list[str]] = field(default_factory=dict)
     observed_component_data: dict[str, dict[str, dict]] = field(default_factory=dict)
     latest_positions: dict[str, tuple[float, float, float]] = field(default_factory=dict)
+    latest_active: dict[str, bool] = field(default_factory=dict)
     movement_before: tuple[float, float, float] | None = None
     movement_after: tuple[float, float, float] | None = None
     camera_before: tuple[float, float, float] | None = None
@@ -715,6 +720,10 @@ class VerificationContract:
     idle_before: tuple[float, float, float] | None = None
     idle_after: tuple[float, float, float] | None = None
     jump_landed: bool = False
+    # 접촉 반응 기록용. Play Mode에서 입력 전/후로 잰 비-Player 오브젝트의 위치와
+    # 활성 상태. 판정에는 쓰지 않는다(A0의 설계 입력).
+    contact_before: dict[str, dict] = field(default_factory=dict)
+    contact_after: dict[str, dict] = field(default_factory=dict)
     blocked_by: dict[str, list[str]] = field(default_factory=dict)
     policy_violations: list[str] = field(default_factory=list)
 
@@ -854,6 +863,10 @@ class VerificationContract:
         elif name == "unity_get_gameobject":
             target = str(args.get("target", "")).strip()
             pos = _position(data)
+            # 접촉 반응은 오브젝트를 Destroy 하거나 SetActive(false) 한다. 위치만
+            # 보면 후자를 놓치므로 활성 상태를 함께 남긴다.
+            if "activeSelf" in data:
+                self.latest_active[target.lower()] = bool(data.get("activeSelf"))
             if pos is not None:
                 self.latest_positions[target.lower()] = pos
                 if target.lower() == "player":
@@ -939,6 +952,56 @@ class VerificationContract:
             if best is None or moved > best[1]:
                 best = (name, moved)
         return best
+
+    def player_sweep(self) -> tuple[float, float, float] | None:
+        """(최소 X, 최대 X, 대표 Y) — 검증이 플레이어를 실제로 지나가게 한 구간."""
+        xs, ys = [], []
+        for store in (self.motion_before, self.motion_after):
+            for pos in store.values():
+                xs.append(pos[0])
+                ys.append(pos[1])
+        if not xs:
+            return None
+        return min(xs), max(xs), sum(ys) / len(ys)
+
+    def contact_report(self) -> list[dict]:
+        """접촉 반응의 재료. 판정하지 않고 기록만 한다.
+
+        A0의 막힌 지점은 "호스트가 접촉을 일으킬 수 없다"가 아니라 **"안 사라졌을 때
+        고장인지 안 닿은 건지 모른다"**는 비대칭이었다. 그 비대칭은 풀 수 있다 —
+        호스트는 플레이어가 실제로 지나간 X 구간과 오브젝트 좌표를 둘 다 갖고 있으므로,
+        **닿았어야 하는지를 계산할 수 있다.**
+
+        - `passed=True`인데 그대로 있으면 → 접촉 반응이 동작하지 않은 것이다
+        - `passed=False`면 → 판정하지 않는다(미측정). 실패로 세면 안 된다
+
+        지금은 이 판단을 실패 코드로 만들지 않는다. 어느 정도 빈도로 `passed`가
+        성립하는지, 좌표 여유를 얼마로 둬야 하는지 실측이 없다.
+        """
+        sweep = self.player_sweep()
+        report: list[dict] = []
+        for name, before in self.contact_before.items():
+            after = self.contact_after.get(name)
+            pos = before.get("position")
+            gone = None
+            if after is not None:
+                gone = bool(after.get("missing")) or (
+                    before.get("active") and not after.get("active")
+                )
+            passed = None
+            if sweep is not None and pos is not None:
+                low, high, player_y = sweep
+                passed = (
+                    low - _CONTACT_MARGIN <= pos[0] <= high + _CONTACT_MARGIN
+                    and abs(pos[1] - player_y) <= _CONTACT_HEIGHT
+                )
+            report.append({
+                "object": name,
+                "position": [round(v, 3) for v in pos] if pos else None,
+                "player_passed": passed,
+                "disappeared": gone,
+            })
+        return report
 
     def _find_node(self, name: str) -> dict | None:
         """Locate one object anywhere in the observed hierarchy."""
@@ -1405,6 +1468,8 @@ class VerificationContract:
                 None if (best := self.autonomous_motion_delta()) is None
                 else {"object": best[0], "distance": round(best[1], 4)}
             ),
+            # 판정에 쓰지 않는 기록. A0(접촉 반응 검사)의 설계 입력이다.
+            "contact_candidates": self.contact_report() or None,
             "components": self.observed_components,
             "component_data": self.observed_component_data,
             "player_movement_delta": delta(self.movement_before, self.movement_after),
