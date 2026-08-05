@@ -12,8 +12,8 @@ from local_tools import wait_seconds
 from preflight import inspect_request
 from policy_lint import apply_safe_repairs, lint_scripts
 from verification import (
-    VerificationContract, VerificationSpec, failure_check_name, failure_count,
-    fix_prompt, write_receipt,
+    VerificationContract, VerificationSpec, contact_already_gone,
+    failure_check_name, failure_count, fix_prompt, write_receipt,
 )
 from version import __version__
 
@@ -2049,6 +2049,20 @@ class ContactCandidateRecordingTests(unittest.TestCase):
             }),
         )
         self.assertEqual(contract.latest_scales["player"], (1.0, 2.0, 1.0))
+
+    def test_a_sample_that_saw_a_disappearance_is_not_overwritten(self):
+        """구간마다 Play Mode가 정지되고, 정지는 런타임 Destroy를 되돌린다.
+
+        매번 덮어쓰면 **마지막 구간에서 사라진 것만** 남는다. 기록 전체에서
+        `disappeared: true`가 하나(`Coin_2`, 점프로 닿았고 점프가 마지막 구간)뿐이었던
+        이유가 그것이다. 실측 6회 전부 아이템이 0.25~1.0 겹쳤는데 `false`였다.
+        """
+        self.assertTrue(contact_already_gone({"missing": True, "active": None}))
+        self.assertTrue(contact_already_gone({"missing": False, "active": False}))
+        self.assertFalse(contact_already_gone({"missing": False, "active": True}))
+        self.assertFalse(contact_already_gone(None))
+        # 아직 활성 여부를 못 읽은 표본은 사라진 것이 아니다
+        self.assertFalse(contact_already_gone({"missing": False, "active": None}))
 
     def test_recording_never_changes_the_verdict(self):
         """A0는 아직 검사가 아니다. 기록이 실패를 만들면 규칙을 어기는 것이다."""

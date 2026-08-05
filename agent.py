@@ -18,8 +18,8 @@ from policy_lint import apply_safe_repairs
 from run_logging import RunLogger
 from task_contract import TaskContract
 from verification import (
-    MUTATION_TOOLS, VerificationContract, VerificationSpec, failure_check_name,
-    failure_count, fix_prompt, write_receipt,
+    MUTATION_TOOLS, VerificationContract, VerificationSpec, contact_already_gone,
+    failure_check_name, failure_count, fix_prompt, write_receipt,
 )
 
 SYSTEM_PROMPT = """\
@@ -698,8 +698,14 @@ class Agent:
             return False
 
         async def restart_play() -> bool:
-            """Reset runtime state so one measurement cannot contaminate the next."""
+            """Reset runtime state so one measurement cannot contaminate the next.
+
+            정지는 런타임 `Destroy()`도 되돌린다. 이 구간에서 접촉으로 사라진 것이
+            있다면 **여기서 재지 않으면 영원히 못 본다** — 다음 줄에서 되살아난다.
+            """
             if contract.playing:
+                if contract.contact_before:
+                    await sample_objects(contract.contact_after)
                 await self._verification_call(
                     contract, "unity_play_mode", {"action": "stop"}
                 )
@@ -842,8 +848,15 @@ class Agent:
 
                     크기도 함께 남긴다. 접촉은 중심이 아니라 표면에서 일어나므로
                     중심 거리만으로는 닿은 것과 떨어진 것을 가를 수 없다(A0).
+
+                    **사라진 것은 사라진 채로 남긴다.** 측정 구간마다 `restart_play()`가
+                    Play Mode를 정지하는데, 정지는 런타임 `Destroy()`를 되돌린다. 매번
+                    덮어쓰면 마지막 구간에서 사라진 것만 남고 그 앞의 것은 전부
+                    지워진다 — 기록 전체에서 `disappeared: true`가 하나뿐이었던 이유다.
                     """
                     for target in contract.autonomous_candidates():
+                        if contact_already_gone(store.get(target)):
+                            continue
                         result = await self._verification_call(
                             contract, "unity_get_gameobject", {"target": target}
                         )

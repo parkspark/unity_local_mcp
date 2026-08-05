@@ -332,6 +332,18 @@ def _scale(value: dict) -> tuple[float, float, float] | None:
         return None
 
 
+def contact_already_gone(sample: dict | None) -> bool:
+    """이 접촉 표본이 이미 "사라짐"을 담고 있는가.
+
+    측정 구간마다 `restart_play()`가 Play Mode를 정지하고, 정지는 런타임
+    `Destroy()`를 되돌린다. 그래서 사라진 것을 본 표본은 **덮어쓰면 안 된다** —
+    다음 구간에서는 되살아나 있기 때문이다.
+    """
+    if not sample:
+        return False
+    return bool(sample.get("missing")) or sample.get("active") is False
+
+
 def _normalise_path(value: str) -> str:
     return str(value or "").replace("\\", "/").lstrip("/")
 
@@ -1093,6 +1105,10 @@ class VerificationContract:
 
         그래서 임계값을 굽지 않고 **가장 가까웠던 거리**를 그대로 남긴다. 표본이
         쌓이면 그때 판정 기준을 고른다.
+
+        `disappeared`는 "지금 없다"가 아니라 **"측정 중 한 번이라도 사라졌다"**이다.
+        구간마다 Play Mode가 정지·재시작되고 정지는 `Destroy()`를 되돌리므로, 마지막
+        상태만 보면 마지막 구간의 접촉밖에 볼 수 없다.
         """
         report: list[dict] = []
         for name, before in self.contact_before.items():
