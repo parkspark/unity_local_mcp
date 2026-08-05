@@ -839,6 +839,9 @@ class Agent:
                     접촉 반응(코인 획득, 적 처치)은 오브젝트를 없애거나 비활성화하므로,
                     이동 측정 전후로 이것을 재면 무슨 일이 일어났는지 남는다. 판정에는
                     쓰지 않고 영수증에만 남긴다 — 검사로 만들기 전에 실측이 필요하다.
+
+                    크기도 함께 남긴다. 접촉은 중심이 아니라 표면에서 일어나므로
+                    중심 거리만으로는 닿은 것과 떨어진 것을 가를 수 없다(A0).
                     """
                     for target in contract.autonomous_candidates():
                         result = await self._verification_call(
@@ -848,6 +851,7 @@ class Agent:
                         store[target] = {
                             "position": contract.latest_positions.get(target.lower()),
                             "active": contract.latest_active.get(target.lower()),
+                            "scale": contract.latest_scales.get(target.lower()),
                             "missing": missing,
                         }
 

@@ -1982,6 +1982,74 @@ class ContactCandidateRecordingTests(unittest.TestCase):
         self.assertEqual(by_name["Coin_1"]["scripts"], ["Coin"])
         self.assertEqual(by_name["Ground"]["scripts"], [])
 
+    def _sized(self, position, scale, player_scale=(1.0, 1.0, 1.0)):
+        contract = self._contract(
+            {"Item": {"position": position, "active": True,
+                      "missing": False, "scale": scale}},
+            {},
+            samples=(),
+        )
+        contract.motion_before["d"] = (0.0, 1.0, 0.0)
+        contract.motion_after["d"] = (4.95, 1.0, 0.0)
+        if player_scale is not None:
+            contract.latest_scales["player"] = player_scale
+        return contract.contact_report()[0]
+
+    def test_surface_gap_subtracts_both_half_extents(self):
+        """실측 0.773의 정체 — 1×1×1 플레이어와 0.5 코인은 맞닿아도 중심 거리 0.75다.
+
+        경로 바로 위에 있던 `Item`이 "안 닿았다"처럼 읽힌 이유가 이것이다. 중심
+        거리로는 닿은 것과 떨어진 것을 가를 수 없다.
+        """
+        record = self._sized((1.5, 1.75, 0.0), (0.5, 0.5, 0.5))
+        self.assertAlmostEqual(record["nearest_player_distance"], 0.75, places=3)
+        self.assertAlmostEqual(record["surface_gap"], 0.0, places=3)
+
+    def test_an_overlap_is_negative_not_clamped(self):
+        """겹친 정도를 남긴다. 0에서 자르면 '살짝 스쳤다'와 '관통했다'가 같아진다."""
+        record = self._sized((1.5, 1.75, 0.0), (0.5, 0.5, 0.5),
+                             player_scale=(1.0, 2.0, 1.0))
+        self.assertAlmostEqual(record["surface_gap"], -0.5, places=3)
+
+    def test_a_distant_object_keeps_a_positive_gap(self):
+        record = self._sized((1.5, 5.0, 0.0), (0.5, 0.5, 0.5))
+        self.assertAlmostEqual(record["surface_gap"], 3.25, places=3)
+
+    def test_the_gap_is_none_when_a_size_is_unknown(self):
+        """모르는 것을 기본값으로 채우면 없는 접촉을 지어낸다."""
+        self.assertIsNone(self._sized((1.5, 1.75, 0.0), None)["surface_gap"])
+        self.assertIsNone(
+            self._sized((1.5, 1.75, 0.0), (0.5, 0.5, 0.5), player_scale=None)
+            ["surface_gap"]
+        )
+
+    def test_the_scale_is_recorded_beside_the_distance(self):
+        record = self._sized((1.5, 1.75, 0.0), (0.5, 0.5, 0.5))
+        self.assertEqual(record["scale"], [0.5, 0.5, 0.5])
+
+    def test_the_half_extent_follows_the_direction_of_approach(self):
+        """납작한 바닥은 위에서 볼 때와 옆에서 볼 때 반폭이 다르다."""
+        floor = (10.0, 1.0, 10.0)
+        self.assertAlmostEqual(
+            VerificationContract._box_radius(floor, (0.0, 1.0, 0.0)), 0.5, places=3
+        )
+        self.assertAlmostEqual(
+            VerificationContract._box_radius(floor, (1.0, 0.0, 0.0)), 5.0, places=3
+        )
+
+    def test_the_scale_comes_from_the_observed_transform(self):
+        contract = self._contract({}, {}, samples=())
+        contract.observe(
+            "unity_get_gameobject",
+            {"target": "Player"},
+            result({
+                "name": "Player", "activeSelf": True,
+                "transform": {"position": [0.0, 1.0, 0.0],
+                              "localScale": [1.0, 2.0, 1.0]},
+            }),
+        )
+        self.assertEqual(contract.latest_scales["player"], (1.0, 2.0, 1.0))
+
     def test_recording_never_changes_the_verdict(self):
         """A0는 아직 검사가 아니다. 기록이 실패를 만들면 규칙을 어기는 것이다."""
         recorded = self._contract(

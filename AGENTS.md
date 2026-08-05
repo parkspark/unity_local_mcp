@@ -1,7 +1,7 @@
 # AGENTS.md — unity_local_mcp 작업 규칙
 
 로컬 LLM(Ollama `qwen3-coder:30b`)으로 Unity Editor를 제어하는 에이전트 CLI.
-현재 v1.11.26. 이 저장소에서 작업하는 모든 에이전트는 아래 규칙을 따른다.
+현재 v1.11.27. 이 저장소에서 작업하는 모든 에이전트는 아래 규칙을 따른다.
 
 ---
 
@@ -91,7 +91,7 @@ uv run python main.py --prompt-file <파일>
 ## 5. 표준 명령
 
 ```bash
-# 테스트 (현재 279개 통과, subtest 48개 통과)
+# 테스트 (현재 286개 통과, subtest 48개 통과)
 uv run python -m pytest tests/
 
 # 로컬 모델 E2E — 빌더부터 전체
@@ -176,4 +176,8 @@ main.py (CLI) → planner.py (큰 요청 → 마일스톤 분해)
 | v1.11.14 | **미매핑 요구사항 기록** — 이동만 측정하고 요청의 핵심(점수·소멸·클리어)은 안 재던 `verified`를 영수증·화면에 드러냄(오탐 0/32). 빌더 예산 분류 로깅. 사용자 실제 문장 둘이 드러낸 추출 공백 여덟 수정, 요청 문구 어휘를 `verification` 단일 출처로 통합, 부스트·점프 배치 수정 안내 추가 | [문서](docs/v1.11.14_unmapped_requirements.md) |
 | v1.11.15 | **카메라 관찰 판정·부스트 상한·카메라 스크립트 오탐 제거** — 시점 카메라가 추종 검사를 통과하던 것을 거리로 판정, `CameraController.cs` 13회 오차단 제거로 복합 요청 첫 `build_stage_success=true`, 140유닛 대시를 잡는 10배 상한 | [문서](docs/v1.11.15_camera_observation_and_boost_cap.md) |
 
-**현재 진행 상황과 다음 작업**: [docs/HANDOFF_2026-07-29.md](docs/HANDOFF_2026-07-29.md)
+v1.11.16 이후 항목은 표를 늘리지 않는다. **전체 히스토리는 [README.md](README.md)의
+버전 히스토리**에 있고, 각 항목이 `docs/vX.Y.Z_*.md`로 링크된다.
+
+**현재 무엇이 열려 있는지**: [docs/STATUS.md](docs/STATUS.md) — §3.1의 단일 출처.
+(`docs/HANDOFF_2026-07-29.md`는 그 시점의 기록이며 현재 상태가 아니다.)

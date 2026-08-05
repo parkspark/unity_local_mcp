@@ -322,6 +322,16 @@ def _position(value: dict) -> tuple[float, float, float] | None:
         return None
 
 
+def _scale(value: dict) -> tuple[float, float, float] | None:
+    try:
+        raw = value["transform"]["localScale"]
+        if not isinstance(raw, list) or len(raw) != 3:
+            return None
+        return tuple(abs(float(item)) for item in raw)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _normalise_path(value: str) -> str:
     return str(value or "").replace("\\", "/").lstrip("/")
 
@@ -692,6 +702,10 @@ class VerificationContract:
     observed_component_data: dict[str, dict[str, dict]] = field(default_factory=dict)
     latest_positions: dict[str, tuple[float, float, float]] = field(default_factory=dict)
     latest_active: dict[str, bool] = field(default_factory=dict)
+    # 접촉 거리를 표면 간격으로 바꾸려면 크기가 필요하다. 중심 거리 0.773은 1×1×1
+    # 플레이어와 0.5짜리 코인에서 **맞닿은 상태**이지만, 크기를 모르면 그것과
+    # "0.773만큼 떨어져 있었다"를 구분할 수 없었다(A0).
+    latest_scales: dict[str, tuple[float, float, float]] = field(default_factory=dict)
     # 검증이 실제로 플레이어를 데려간 모든 지점. 접촉 판단의 원자료다.
     player_samples: list = field(default_factory=list)
     movement_before: tuple[float, float, float] | None = None
@@ -865,6 +879,9 @@ class VerificationContract:
             # 보면 후자를 놓치므로 활성 상태를 함께 남긴다.
             if "activeSelf" in data:
                 self.latest_active[target.lower()] = bool(data.get("activeSelf"))
+            scale = _scale(data)
+            if scale is not None:
+                self.latest_scales[target.lower()] = scale
             if pos is not None:
                 self.latest_positions[target.lower()] = pos
                 if target.lower() == "player" and pos not in self.player_samples:
@@ -978,29 +995,87 @@ class VerificationContract:
         return paths
 
     @staticmethod
-    def _distance_to_segment(pos, start, end) -> float:
+    def _closest_point_on_segment(pos, start, end) -> tuple:
         span = tuple(e - s for e, s in zip(end, start))
         length2 = sum(v * v for v in span)
         if length2 <= 1e-12:
-            return sum((p - s) ** 2 for p, s in zip(pos, start)) ** 0.5
+            return tuple(start)
         t = sum((p - s) * v for p, s, v in zip(pos, start, span)) / length2
         t = max(0.0, min(1.0, t))
-        closest = tuple(s + t * v for s, v in zip(start, span))
+        return tuple(s + t * v for s, v in zip(start, span))
+
+    @classmethod
+    def _distance_to_segment(cls, pos, start, end) -> float:
+        closest = cls._closest_point_on_segment(pos, start, end)
         return sum((p - c) ** 2 for p, c in zip(pos, closest)) ** 0.5
 
-    def nearest_player_distance(self, pos) -> float | None:
-        """이 좌표에 플레이어가 가장 가까이 왔던 거리."""
+    @staticmethod
+    def _box_radius(scale, direction) -> float | None:
+        """중심에서 상자 표면까지, 주어진 방향으로 잰 거리.
+
+        접촉은 중심이 아니라 표면에서 일어난다. 축 정렬 상자에서 중심을 지나는
+        광선이 표면을 뚫는 지점은 축마다의 `half / |d|` 중 **최소**다. 프리미티브
+        큐브는 `localScale`이 곧 한 변이므로 반폭은 그 절반이고, 구는 균일 스케일에서
+        이 값이 반지름과 같다.
+
+        **회전은 보지 않는다.** 빌더가 만드는 바닥·코인·적은 축 정렬이고, 회전한
+        상자까지 정확히 재려면 방향 벡터를 로컬 축으로 옮겨야 한다. 회전한 오브젝트에서
+        이 값은 과소평가(= 간격 과대평가)이므로 접촉을 없다고 지어내지는 않는다.
+        """
+        if scale is None:
+            return None
+        half = [abs(v) / 2.0 for v in scale]
+        length = sum(v * v for v in direction) ** 0.5
+        if length <= 1e-9:
+            return min(half)
+        unit = [v / length for v in direction]
+        ratios = [h / abs(u) for h, u in zip(half, unit) if abs(u) > 1e-9]
+        return min(ratios) if ratios else min(half)
+
+    def nearest_player_approach(self, pos) -> tuple[float, tuple] | None:
+        """이 좌표에 플레이어가 가장 가까이 왔던 거리와, 그때 플레이어가 있던 지점."""
         if pos is None:
             return None
         candidates = [
-            self._distance_to_segment(pos, start, end)
+            self._closest_point_on_segment(pos, start, end)
             for start, end in self.player_paths()
         ]
-        candidates += [
-            sum((a - b) ** 2 for a, b in zip(pos, sample)) ** 0.5
-            for sample in self.player_samples
-        ]
-        return min(candidates) if candidates else None
+        candidates += [tuple(sample) for sample in self.player_samples]
+        if not candidates:
+            return None
+        best = min(
+            candidates,
+            key=lambda c: sum((p - v) ** 2 for p, v in zip(pos, c)),
+        )
+        distance = sum((p - v) ** 2 for p, v in zip(pos, best)) ** 0.5
+        return distance, best
+
+    def nearest_player_distance(self, pos) -> float | None:
+        """이 좌표에 플레이어가 가장 가까이 왔던 거리."""
+        approach = self.nearest_player_approach(pos)
+        return None if approach is None else approach[0]
+
+    def surface_gap(self, pos, scale) -> float | None:
+        """표면끼리의 간격. 음수면 겹쳐 있었다는 뜻이다.
+
+        중심 거리는 크기를 모르면 읽을 수 없다 — 1×1×1 플레이어와 0.5짜리 코인은
+        **맞닿은 순간 중심 거리가 0.75**다. A0의 표본에서 경로 바로 위의 `Item`이
+        0.773으로 기록돼 "안 닿았다"처럼 보였던 것이 정확히 이 값이다.
+        """
+        player_scale = self.latest_scales.get("player")
+        if pos is None or scale is None or player_scale is None:
+            return None
+        approach = self.nearest_player_approach(pos)
+        if approach is None:
+            return None
+        distance, player_point = approach
+        towards_object = [p - c for p, c in zip(pos, player_point)]
+        towards_player = [-v for v in towards_object]
+        object_radius = self._box_radius(scale, towards_player)
+        player_radius = self._box_radius(player_scale, towards_object)
+        if object_radius is None or player_radius is None:
+            return None
+        return distance - object_radius - player_radius
 
     def contact_report(self) -> list[dict]:
         """접촉 반응의 재료. 판정하지 않고 거리만 남긴다.
@@ -1029,12 +1104,19 @@ class VerificationContract:
                     before.get("active") and not after.get("active")
                 )
             distance = self.nearest_player_distance(pos)
+            scale = before.get("scale")
+            gap = self.surface_gap(pos, scale)
             report.append({
                 "object": name,
                 "position": [round(v, 3) for v in pos] if pos else None,
+                "scale": [round(v, 3) for v in scale] if scale else None,
                 "nearest_player_distance": (
                     None if distance is None else round(distance, 3)
                 ),
+                # 판정에 쓰는 단위는 이쪽이다. 중심 거리는 크기를 모르면 읽을 수
+                # 없고, 첫 15건 표본의 분포가 읽히지 않은 이유가 그것이었다.
+                # 음수·0 근방이면 겹쳤다는 뜻이고, 그때도 안 사라졌으면 고장이다.
+                "surface_gap": None if gap is None else round(gap, 3),
                 "disappeared": gone,
                 # 후보 대부분은 상호작용 대상이 아니라 구조물이다(Ground, Floor,
                 # Platform, FlagPole). 첫 15건 표본에서 그 둘이 섞여 거리 분포를
