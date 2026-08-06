@@ -1,7 +1,7 @@
 # AGENTS.md — unity_local_mcp 작업 규칙
 
 로컬 LLM(Ollama `qwen3-coder:30b`)으로 Unity Editor를 제어하는 에이전트 CLI.
-현재 v1.11.33. 이 저장소에서 작업하는 모든 에이전트는 아래 규칙을 따른다.
+현재 v1.11.34. 이 저장소에서 작업하는 모든 에이전트는 아래 규칙을 따른다.
 
 ---
 

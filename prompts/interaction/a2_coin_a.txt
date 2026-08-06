@@ -1,0 +1,1 @@
+Assets/Scenes/A2Coin_a.unity 경로에 새 씬을 생성하고, Player(캡슐)를 만들어 New Input System으로 A/D 좌우 이동과 Space 점프가 되도록 구현해줘. Player가 서 있을 바닥 플랫폼(큐브)도 만들어줘. 코인(노란 큐브) 3개를 공중에 배치하고, Player가 코인에 닿으면 코인이 사라지고 점수가 1 올라가게 해줘.
