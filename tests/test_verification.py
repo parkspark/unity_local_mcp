@@ -2037,6 +2037,33 @@ class ContactCandidateRecordingTests(unittest.TestCase):
             VerificationContract._box_radius(floor, (1.0, 0.0, 0.0)), 5.0, places=3
         )
 
+    def test_the_players_worst_tilt_is_recorded(self):
+        """구르는 캡슐은 세로 반폭이 절반이 된다 — 간격을 액면대로 읽으면 안 된다.
+
+        실측 A/B: 같은 간격 −0.199에서 회전 자유는 획득 실패, 회전 잠금은 성공.
+        기록된 실행 150개 중 101개(67%)에서 플레이어가 15도 넘게 기운다.
+        """
+        contract = self._contract({}, {}, samples=())
+
+        def see(euler):
+            contract.observe("unity_get_gameobject", {"target": "Player"}, result({
+                "name": "Player", "activeSelf": True,
+                "transform": {"position": [0.0, 1.5, 0.0], "localScale": [1.0, 1.0, 1.0],
+                              "eulerAngles": euler},
+            }))
+
+        see([0.0, 0.0, 0.0])
+        self.assertAlmostEqual(contract.player_max_tilt, 0.0, places=3)
+        see([0.0, 0.0, 173.27])
+        # 180도 뒤집힌 것은 수직이다 — 173도는 그로부터 6.73도 기운 것
+        self.assertAlmostEqual(contract.player_max_tilt, 6.73, places=2)
+        see([0.0, 0.0, 90.0])
+        self.assertAlmostEqual(contract.player_max_tilt, 90.0, places=3)
+        # 최대치는 내려가지 않는다
+        see([0.0, 0.0, 0.0])
+        self.assertAlmostEqual(contract.player_max_tilt, 90.0, places=3)
+        self.assertEqual(contract.evidence()["player_max_tilt"], 90.0)
+
     def test_measured_collider_extents_beat_the_scale_guess(self):
         """Unity 캡슐은 scale 1에서 높이가 2다. localScale로 추정하면 세로가 절반이다.
 

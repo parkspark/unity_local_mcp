@@ -332,6 +332,25 @@ def _scale(value: dict) -> tuple[float, float, float] | None:
         return None
 
 
+def _tilt_degrees(value: dict) -> float | None:
+    """수직에서 얼마나 기울었는가. 180도 뒤집힌 것은 기울지 않은 것으로 본다.
+
+    캡슐이 구르면 세로 반폭이 1.0에서 0.5로 줄어든다. 호스트는 구간 양 끝에서만
+    형상을 재므로 그 사이의 기울기를 못 본다 — 실측에서 양 끝은 173°·191°(거의
+    수직)였는데 중간에 90°를 지나가며 접촉이 성립하지 않았다.
+    """
+    try:
+        raw = value["transform"]["eulerAngles"]
+        if not isinstance(raw, list) or len(raw) != 3:
+            return None
+        x, _, z = (float(item) % 180.0 for item in raw)
+    except (KeyError, TypeError, ValueError):
+        return None
+    # 180도 뒤집힌 캡슐의 AABB는 똑바로 선 것과 같다. 기울기는 가장 가까운 180도
+    # 배수에서 얼마나 벗어났는지로 잰다.
+    return max(min(x, 180.0 - x), min(z, 180.0 - z))
+
+
 def _collider_extents(value: dict) -> tuple[float, float, float] | None:
     """가장 큰 콜라이더의 월드 AABB 반폭.
 
@@ -755,6 +774,9 @@ class VerificationContract:
     # 콜라이더 월드 AABB의 반폭. `localScale`은 프리미티브마다 뜻이 달라
     # (캡슐은 scale 1에서 높이 2) 추정이 빗나간다. 있으면 이쪽을 쓴다.
     latest_extents: dict[str, tuple[float, float, float]] = field(default_factory=dict)
+    # 측정 내내 관측된 플레이어의 최대 기울기(도). 캡슐이 구르면 세로 반폭이 절반이
+    # 되므로, 이 값이 크면 `surface_gap`을 액면 그대로 읽으면 안 된다.
+    player_max_tilt: float | None = None
     # 검증이 실제로 플레이어를 데려간 모든 지점. 접촉 판단의 원자료다.
     player_samples: list = field(default_factory=list)
     movement_before: tuple[float, float, float] | None = None
@@ -934,6 +956,12 @@ class VerificationContract:
             extents = _collider_extents(data)
             if extents is not None:
                 self.latest_extents[target.lower()] = extents
+            if target.lower() == "player":
+                tilt = _tilt_degrees(data)
+                if tilt is not None and (
+                    self.player_max_tilt is None or tilt > self.player_max_tilt
+                ):
+                    self.player_max_tilt = tilt
             if pos is not None:
                 self.latest_positions[target.lower()] = pos
                 # 트리거 콜라이더는 바닥과 충돌하지 않는다. 거기에 Rigidbody가 붙으면
@@ -1794,6 +1822,14 @@ class VerificationContract:
             ),
             # 판정에 쓰지 않는 기록. A0(접촉 반응 검사)의 설계 입력이다.
             "contact_candidates": self.contact_report() or None,
+            # 이 값이 크면 위의 `surface_gap`을 액면 그대로 읽으면 안 된다.
+            # 구르는 캡슐은 세로 반폭이 1.0에서 0.5로 줄고, 호스트는 구간 양 끝에서만
+            # 형상을 재므로 그 사이의 겹침을 과장한다. 실측 A/B: 같은 간격 −0.199에서
+            # 회전 자유는 획득 실패, 회전 잠금은 획득 성공.
+            "player_max_tilt": (
+                None if self.player_max_tilt is None
+                else round(self.player_max_tilt, 1)
+            ),
             "components": self.observed_components,
             "component_data": self.observed_component_data,
             "player_movement_delta": delta(self.movement_before, self.movement_after),
