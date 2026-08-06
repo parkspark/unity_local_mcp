@@ -2075,6 +2075,130 @@ class ContactCandidateRecordingTests(unittest.TestCase):
         self.assertIsNotNone(recorded.evidence()["contact_candidates"])
 
 
+class ContactWiringTests(unittest.TestCase):
+    """접촉이 성립하지 않은 채 만들어진다 — 재생 6건 + 라이브 2건.
+
+    A0의 표본이 안 쌓이는 이유가 측정 쪽(v1.11.28)과 빌더 쪽 둘이었다. 빌더 쪽은
+    다시 둘로 갈린다 — 트리거를 아예 안 만들거나(A4), 트리거에 Rigidbody를 붙여
+    아이템이 월드 밖으로 떨어지거나(A5).
+    """
+
+    def _contract(self, script_body="void OnTriggerEnter(Collider o) {}"):
+        self.project = tempfile.mkdtemp()
+        scripts = os.path.join(self.project, "Assets", "Scripts")
+        os.makedirs(scripts, exist_ok=True)
+        with open(os.path.join(scripts, "Pickup.cs"), "w", encoding="utf-8") as handle:
+            handle.write("public class Pickup : MonoBehaviour {%s}" % script_body)
+        spec = VerificationSpec.from_request(
+            "Assets/Scenes/C.unity 경로에 새 씬을 생성하고 Player와 바닥을 만들어 "
+            "A/D 이동을 구현하고, 아이템에 닿으면 아이템이 사라지게 해줘"
+        )
+        contract = VerificationContract(spec=spec, project_dir=self.project)
+        contract.session_scripts.add("Assets/Scripts/Pickup.cs")
+        contract.observe("unity_get_hierarchy", {}, hierarchy(
+            *DEFAULTS,
+            obj("Player", "Transform", "MeshRenderer", "Rigidbody", "CapsuleCollider"),
+            obj("Item", "Transform", "MeshRenderer", "SphereCollider", "Pickup"),
+        ))
+        contract.contact_before["Item"] = {
+            "position": (3.0, 1.0, 0.0), "active": True, "missing": False,
+            "scale": (1.0, 1.0, 1.0),
+        }
+        return contract
+
+    def _see_collider(self, contract, target, kind, is_trigger):
+        contract.observe("unity_get_gameobject", {"target": target}, result({
+            "name": target, "activeSelf": True,
+            "transform": {"position": [3.0, 1.0, 0.0], "localScale": [1.0, 1.0, 1.0]},
+            "components": [{"type": "UnityEngine." + kind,
+                            "data": {"isTrigger": is_trigger, "enabled": True}}],
+        }))
+
+    def test_a_handler_with_no_trigger_anywhere_is_a_dead_branch(self):
+        contract = self._contract()
+        self._see_collider(contract, "Item", "SphereCollider", False)
+        self._see_collider(contract, "Player", "CapsuleCollider", False)
+        self.assertEqual(contract.dead_trigger_handlers(), ["Item"])
+
+    def test_a_trigger_on_either_side_is_enough(self):
+        """OnTriggerEnter는 두 콜라이더 중 하나만 트리거여도 호출된다."""
+        on_item = self._contract()
+        self._see_collider(on_item, "Item", "SphereCollider", True)
+        self._see_collider(on_item, "Player", "CapsuleCollider", False)
+        self.assertEqual(on_item.dead_trigger_handlers(), [])
+        on_player = self._contract()
+        self._see_collider(on_player, "Item", "SphereCollider", False)
+        self._see_collider(on_player, "Player", "CapsuleCollider", True)
+        self.assertEqual(on_player.dead_trigger_handlers(), [])
+
+    def test_a_handler_on_the_player_is_seen_too(self):
+        """기록된 6건 중 4건이 이 형태다 — 핸들러가 PlayerMovement.cs에 있다.
+
+        접촉 후보만 보면 통째로 놓친다. 라이브에서 실제로 놓쳤다(r10).
+        """
+        contract = self._contract()
+        with open(os.path.join(self.project, "Assets", "Scripts",
+                               "PlayerMovement.cs"), "w", encoding="utf-8") as handle:
+            handle.write("public class PlayerMovement { void OnTriggerEnter(Collider o) {} }")
+        contract.session_scripts.add("Assets/Scripts/PlayerMovement.cs")
+        contract.observe("unity_get_hierarchy", {}, hierarchy(
+            *DEFAULTS,
+            obj("Player", "Transform", "CapsuleCollider", "PlayerMovement"),
+            obj("Item", "Transform", "SphereCollider"),
+        ))
+        self._see_collider(contract, "Item", "SphereCollider", False)
+        self._see_collider(contract, "Player", "CapsuleCollider", False)
+        self.assertEqual(contract.dead_trigger_handlers(), ["Player"])
+
+    def test_a_collision_handler_is_not_required_to_use_a_trigger(self):
+        """OnCollisionEnter로 구현한 정상적인 획득을 결함으로 만들면 안 된다."""
+        contract = self._contract(script_body="void OnCollisionEnter(Collision c) {}")
+        self._see_collider(contract, "Item", "SphereCollider", False)
+        self._see_collider(contract, "Player", "CapsuleCollider", False)
+        self.assertEqual(contract.dead_trigger_handlers(), [])
+
+    def test_an_unobserved_collider_is_not_a_failure(self):
+        """모르는 것을 근거로 실패시키지 않는다 — 구버전 브리지는 isTrigger를 안 준다."""
+        contract = self._contract()
+        self.assertEqual(contract.dead_trigger_handlers(), [])
+
+    def test_an_object_that_fell_out_of_the_world_is_reported(self):
+        """실측: 트리거 + Rigidbody → y 1.0 → −44.63. 도착했을 때 그 자리에 없다."""
+        contract = self._contract()
+        contract.lowest_y["item"] = -44.63
+        self.assertEqual(contract.fallen_contact_objects(), ["Item"])
+
+    def test_a_small_drop_is_not_a_fall(self):
+        """수직으로 움직이는 발판을 결함으로 만들지 않는다."""
+        contract = self._contract()
+        contract.lowest_y["item"] = -5.0
+        self.assertEqual(contract.fallen_contact_objects(), [])
+
+    def test_structures_without_scripts_are_not_judged(self):
+        contract = self._contract()
+        contract.contact_before["Ground"] = {
+            "position": (0.0, -0.5, 0.0), "active": True, "missing": False,
+        }
+        contract.lowest_y["ground"] = -80.0
+        self.assertEqual(contract.fallen_contact_objects(), [])
+
+    def test_both_findings_reach_the_failure_list_and_the_remedy(self):
+        contract = self._contract()
+        self._see_collider(contract, "Item", "SphereCollider", False)
+        self._see_collider(contract, "Player", "CapsuleCollider", False)
+        contract.lowest_y["item"] = -44.63
+        failures = contract.failures()
+        self.assertIn("trigger_handler_without_trigger_collider:Item", failures)
+        self.assertIn("contact_object_fell_away:Item", failures)
+        self.assertEqual(
+            failure_check_name("trigger_handler_without_trigger_collider:Item"),
+            "gameplay",
+        )
+        prompt = fix_prompt(contract.spec, failures, {})
+        self.assertIn("isTrigger", prompt)
+        self.assertIn("Rigidbody를 붙이지 않는다", prompt)
+
+
 class AutonomousMotionTests(unittest.TestCase):
     """스스로 움직여야 하는 것이 움직이는지 보는 검사가 없었다.
 

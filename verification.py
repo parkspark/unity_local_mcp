@@ -718,6 +718,8 @@ class VerificationContract:
     # 플레이어와 0.5짜리 코인에서 **맞닿은 상태**이지만, 크기를 모르면 그것과
     # "0.773만큼 떨어져 있었다"를 구분할 수 없었다(A0).
     latest_scales: dict[str, tuple[float, float, float]] = field(default_factory=dict)
+    # 측정 내내 관측된 최저 높이. 낙하는 재시작으로 되돌아가므로 마지막 값에 안 남는다.
+    lowest_y: dict[str, float] = field(default_factory=dict)
     # 검증이 실제로 플레이어를 데려간 모든 지점. 접촉 판단의 원자료다.
     player_samples: list = field(default_factory=list)
     movement_before: tuple[float, float, float] | None = None
@@ -896,6 +898,12 @@ class VerificationContract:
                 self.latest_scales[target.lower()] = scale
             if pos is not None:
                 self.latest_positions[target.lower()] = pos
+                # 트리거 콜라이더는 바닥과 충돌하지 않는다. 거기에 Rigidbody가 붙으면
+                # 아이템이 월드 밖으로 떨어지고, 플레이어가 도착했을 때 그 자리에
+                # 아무것도 없다. 마지막 표본만 보면 재시작으로 되살아난 위치가 남는다.
+                seen = self.lowest_y.get(target.lower())
+                if seen is None or pos[1] < seen:
+                    self.lowest_y[target.lower()] = pos[1]
                 if target.lower() == "player" and pos not in self.player_samples:
                     self.player_samples.append(pos)
                 if target.lower() == "player":
@@ -1149,6 +1157,95 @@ class VerificationContract:
         "light", "universaladditionallightdata", "recttransform",
     })
 
+    # 낙하 판정 문턱. 관측된 낙하는 한 표본 만에 −9, 최종 −45까지 갔다. 수직으로
+    # 움직이는 발판을 결함으로 만들지 않도록 넉넉히 잡는다.
+    FALL_DEPTH = 10.0
+
+    def fallen_contact_objects(self) -> list[str]:
+        """측정 중 시작 높이보다 훨씬 아래로 내려간 상호작용 대상.
+
+        `Ground`·`Floor` 같은 구조물은 스크립트가 없어 제외된다 — 이 검사는 접촉
+        대상이 제자리에 있었는지를 보는 것이고, 없어진 자리에서 잰 거리는 허수다.
+        """
+        fallen = []
+        for name, before in self.contact_before.items():
+            position = before.get("position")
+            lowest = self.lowest_y.get(name.lower())
+            if position is None or lowest is None:
+                continue
+            if not self._object_scripts(name):
+                continue
+            if position[1] - lowest > self.FALL_DEPTH:
+                fallen.append(name)
+        return fallen
+
+    def _trigger_collider_seen(self, target: str) -> bool | None:
+        """이 오브젝트에 트리거 콜라이더가 있는가. `None`이면 판별 불가.
+
+        브리지가 `isTrigger`를 내주기 시작한 것이 v1.11.29다. 그 이전 응답이나
+        콜라이더를 아직 안 본 오브젝트에서는 **모르는 것을 근거로 실패시키지 않는다.**
+        """
+        data = self.observed_component_data.get(target)
+        if not isinstance(data, dict):
+            return None
+        known = [
+            value for name, value in data.items()
+            if name.lower().split(".")[-1].endswith("collider")
+            and isinstance(value, dict) and "isTrigger" in value
+        ]
+        if not known:
+            return None
+        return any(bool(value.get("isTrigger")) for value in known)
+
+    def _trigger_handler_scripts(self, name: str) -> list[str]:
+        """이 오브젝트에 붙은 스크립트 중 `OnTriggerEnter`를 정의한 것.
+
+        요청 어휘가 아니라 **빌더가 실제로 쓴 코드**를 근거로 삼는다. 핸들러를
+        달았다는 것은 트리거 의미론을 의도했다는 뜻이고, 트리거가 없으면 그 분기는
+        영원히 죽는다. `OnCollisionEnter`로 구현한 정상적인 획득은 걸리지 않는다.
+        """
+        attached = {item.lower() for item in self._object_scripts(name)}
+        if not attached:
+            return []
+        found = []
+        for path in sorted(self.session_scripts):
+            stem = os.path.splitext(os.path.basename(str(path)))[0]
+            if stem.lower() not in attached:
+                continue
+            try:
+                with open(os.path.join(self.project_dir, str(path)),
+                          encoding="utf-8", errors="replace") as handle:
+                    text = handle.read()
+            except OSError:
+                continue
+            if "OnTriggerEnter" in text:
+                found.append(stem)
+        return found
+
+    def dead_trigger_handlers(self) -> list[str]:
+        """`OnTriggerEnter`를 달아 놓고 트리거 콜라이더가 없는 접촉 대상.
+
+        `OnTriggerEnter`는 두 콜라이더 중 하나가 트리거여야 호출된다. 어느 쪽에
+        트리거가 있든 발동하므로, **관측된 모든 참여자가 트리거가 아니라고 확인된
+        경우에만** 실패로 삼는다. 하나라도 트리거이거나 판별이 안 되면 넘어간다.
+
+        핸들러는 **양쪽 어디에나** 있을 수 있다. 기록된 실행에서 걸린 6건 중 4건은
+        핸들러가 `PlayerMovement.cs`, 즉 플레이어 쪽에 있었다. 접촉 후보만 보면
+        그 형태를 통째로 놓친다(라이브 실측 1건).
+        """
+        participants = list(self.contact_before) + ["Player"]
+        dead = []
+        for name in participants:
+            if not self._trigger_handler_scripts(name):
+                continue
+            if any(
+                self._trigger_collider_seen(other) is not False
+                for other in participants
+            ):
+                continue
+            dead.append(name)
+        return dead
+
     def _object_scripts(self, name: str) -> list[str]:
         """이 오브젝트에 붙은 사용자 스크립트 이름."""
         node = self._find_node(name)
@@ -1370,6 +1467,14 @@ class VerificationContract:
                 failed.append("runtime_console_not_checked")
             elif self.runtime_error_count:
                 failed.append(f"runtime_errors:{self.runtime_error_count}")
+        # 접촉 배선. 요청 어휘가 아니라 빌더가 쓴 코드와 씬의 실제 상태를 본다.
+        # A0의 표본이 안 쌓이는 이유가 여기 둘이었다 — 트리거를 안 만들거나(A4),
+        # 트리거에 Rigidbody를 붙여 아이템이 떨어지거나(A5).
+        if self.spec.require_gameplay and "gameplay" not in self.blocked_by:
+            for name in self.dead_trigger_handlers():
+                failed.append(f"trigger_handler_without_trigger_collider:{name}")
+            for name in self.fallen_contact_objects():
+                failed.append(f"contact_object_fell_away:{name}")
         if self.spec.require_level_marker and not self.level_marker_seen:
             failed.append("level_loaded_marker_missing")
         if self.spec.require_autonomous_motion:
@@ -1676,6 +1781,8 @@ class VerificationContract:
 _FAILURE_CHECK_PREFIXES = (
     ("scene_has_no_created_objects", "scene_objects"),
     ("scene_contents_not_observed", "scene_objects"),
+    ("trigger_handler_without_trigger_collider", "gameplay"),
+    ("contact_object_fell_away", "gameplay"),
     ("no_object_moved_on_its_own", "autonomous_motion"),
     ("autonomous_motion_not_measured", "autonomous_motion"),
     ("player_has_no_renderer", "player_visible"),
@@ -1815,6 +1922,24 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
                 "배치하지 않았거나, 다른 씬에 만들었거나, 저장 전에 씬을 바꿨을 수 "
                 "있다. unity_create_gameobject로 요청한 오브젝트를 활성 씬에 만들고 "
                 "unity_save_scene까지 한 뒤 unity_get_hierarchy로 확인한다."
+            )
+        if "trigger_handler_without_trigger_collider:" in failure:
+            lint_guidance.append(
+                "- trigger_handler_without_trigger_collider: OnTriggerEnter를 "
+                "달아 놓고 트리거 콜라이더가 어디에도 없다. 그 분기는 절대 "
+                "호출되지 않는다. 대상 오브젝트의 Collider에서 isTrigger를 true로 "
+                "설정한다(unity_set_component_property로 SphereCollider·BoxCollider의 "
+                "isTrigger). 플레이어 쪽 콜라이더는 트리거로 만들지 않는다 — "
+                "바닥을 통과해 떨어진다."
+            )
+        if "contact_object_fell_away:" in failure:
+            lint_guidance.append(
+                "- contact_object_fell_away: 접촉 대상이 측정 중 월드 밖으로 "
+                "떨어졌다. **트리거 콜라이더는 바닥과 충돌하지 않는다.** 거기에 "
+                "Rigidbody가 붙어 있으면 중력이 무한히 끌어내린다. 획득 아이템에는 "
+                "Rigidbody를 붙이지 않는다(unity_remove_component). 꼭 필요하면 "
+                "isKinematic을 true로 둔다. 플레이어 쪽 Rigidbody만으로 "
+                "OnTriggerEnter는 정상 발동한다."
             )
         if failure == "no_object_moved_on_its_own":
             lint_guidance.append(
