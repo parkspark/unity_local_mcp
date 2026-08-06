@@ -2121,6 +2121,104 @@ class ContactCandidateRecordingTests(unittest.TestCase):
         self.assertIsNotNone(recorded.evidence()["contact_candidates"])
 
 
+class ContactVanishJudgementTests(unittest.TestCase):
+    """A0 승격 — 뚫고 지나갔는데 반응이 없으면 실패다.
+
+    근거는 회전을 잠근 통제 스윕이다(v1.11.33). 같은 씬에서 아이템 높이만 바꿨다.
+
+        간격 +0.100 → 사라짐 False / −0.050 → True / −0.198 → True
+
+    경계는 0이고, 판정은 −0.25보다 안쪽만 한다.
+    """
+
+    REQUEST = ("Assets/Scenes/C.unity 경로에 새 씬을 생성하고 Player와 바닥을 만들어 "
+               "A/D 이동을 구현하고, 아이템에 닿으면 아이템이 사라지게 해줘")
+
+    def _contract(self, request=None, gap_position=(3.0, 1.5, 0.0), tilt=0.0):
+        spec = VerificationSpec.from_request(request or self.REQUEST)
+        contract = VerificationContract(spec=spec, project_dir="")
+        contract.observe("unity_get_hierarchy", {}, hierarchy(
+            *DEFAULTS,
+            obj("Player", "Transform", "MeshRenderer", "Rigidbody", "CapsuleCollider"),
+            obj("Item", "Transform", "MeshRenderer", "SphereCollider", "Pickup"),
+            obj("Ground", "Transform", "MeshRenderer", "BoxCollider"),
+        ))
+        contract.player_max_tilt = tilt
+        contract.latest_scales["player"] = (1.0, 1.0, 1.0)
+        contract.latest_extents["player"] = (0.5, 1.0, 0.5)
+        contract.motion_before["d"] = (0.0, 1.5, 0.0)
+        contract.motion_after["d"] = (4.95, 1.5, 0.0)
+        for name, pos in (("Item", gap_position), ("Ground", (0.0, 0.0, 0.0))):
+            contract.contact_before[name] = {
+                "position": pos, "active": True, "missing": False,
+                "scale": (1.0, 1.0, 1.0),
+            }
+            contract.contact_after[name] = dict(contract.contact_before[name])
+        return contract
+
+    def test_the_request_shape_turns_the_check_on(self):
+        self.assertIn("contact_vanish", VerificationSpec.from_request(
+            self.REQUEST).requested_checks())
+
+    def test_a_deep_overlap_with_no_reaction_fails(self):
+        contract = self._contract()
+        self.assertEqual(contract.unreacted_contacts(), ["Item"])
+        self.assertIn("contact_target_did_not_react:Item", contract.failures())
+
+    def test_an_object_that_vanished_is_not_a_failure(self):
+        contract = self._contract()
+        contract.contact_after["Item"] = {"position": None, "active": None,
+                                          "missing": True, "scale": (1.0, 1.0, 1.0)}
+        self.assertEqual(contract.unreacted_contacts(), [])
+
+    def test_the_boundary_is_not_judged(self):
+        """경계는 0이지만 −0.25 바깥은 판정하지 않는다. 실측 −0.199는 정상이었다."""
+        # 플레이어 경로 y=1.5, 반폭 1.0 + 아이템 0.5 → y 3.0이 간격 0
+        self.assertEqual(self._contract(gap_position=(3.0, 2.9, 0.0))
+                         .unreacted_contacts(), [])
+        self.assertEqual(self._contract(gap_position=(3.0, 3.1, 0.0))
+                         .unreacted_contacts(), [])
+
+    def test_a_tilted_player_is_not_judged(self):
+        """구르는 캡슐은 세로 반폭이 절반이 되고 호스트는 겹침을 과장한다."""
+        self.assertEqual(self._contract(tilt=45.0).unreacted_contacts(), [])
+        contract = self._contract(tilt=45.0)
+        self.assertNotIn("contact_vanish", contract.measured_checks())
+
+    def test_the_tilt_must_be_known(self):
+        contract = self._contract()
+        contract.player_max_tilt = None
+        self.assertEqual(contract.unreacted_contacts(), [])
+
+    def test_structures_are_never_judged(self):
+        """바닥은 늘 겹친다 — 스크립트가 없다는 것이 유일한 방벽이다."""
+        contract = self._contract()
+        self.assertNotIn("Ground", contract.unreacted_contacts())
+
+    def test_a_stomp_request_is_out_of_scope(self):
+        """호스트 입력은 좌우 이동과 제자리 점프뿐이라 밟기를 못 만든다."""
+        contract = self._contract(request=(
+            "Assets/Scenes/C.unity 경로에 새 씬을 생성하고 Player와 바닥을 만들어 "
+            "A/D 이동을 구현하고, 적을 위에서 밟으면 적이 사라지게 해줘"))
+        self.assertFalse(contract.spec.require_contact_vanish)
+        self.assertEqual(contract.unreacted_contacts(), [])
+
+    def test_a_clear_state_request_is_out_of_scope(self):
+        """깃발은 클리어 상태를 만들지 소멸하지 않는다."""
+        contract = self._contract(request=(
+            "Assets/Scenes/C.unity 경로에 새 씬을 생성하고 Player와 바닥을 만들어 "
+            "A/D 이동을 구현하고, 깃발에 닿으면 클리어 상태가 되게 해줘"))
+        self.assertFalse(contract.spec.require_contact_vanish)
+
+    def test_the_failure_reaches_its_own_check_and_a_remedy(self):
+        self.assertEqual(
+            failure_check_name("contact_target_did_not_react:Item"), "contact_vanish")
+        prompt = fix_prompt(self._contract().spec,
+                            ["contact_target_did_not_react:Item"], {})
+        self.assertIn("GetComponent", prompt)
+        self.assertIn("isTrigger", prompt)
+
+
 class ContactWiringTests(unittest.TestCase):
     """접촉이 성립하지 않은 채 만들어진다 — 재생 6건 + 라이브 2건.
 

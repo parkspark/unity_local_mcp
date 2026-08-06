@@ -127,6 +127,21 @@ _SCENE_OBJECT_WORDS = (
 # 움직여야 하는 대상이다. 2026-08-03 실행에서 "적을 좌우로 자동 순찰하게"가
 # `verified`로 나갔고 — EnemyPatrol.cs는 실제로 만들어졌지만 — 그것이 움직이는지
 # 본 검사는 하나도 없었다(영수증 20260803_002929 계열).
+# "닿으면 사라진다" 형태. 접촉과 소멸이 **같은 요청 안에** 있어야 한다.
+_TOUCH_PATTERN = re.compile(r"에\s*닿으면|에\s*맞으면|충돌하면|부딪히면|먹으면|획득", re.I)
+_VANISH_PATTERN = re.compile(r"사라지|없어지|제거되|파괴되|destroy|획득", re.I)
+# 호스트가 만들 수 없는 접촉. 입력은 좌우 이동과 제자리 점프뿐이라 "위에서 밟는"
+# 것을 재현하지 못한다. 옆에서 부딪힌 것을 "안 사라졌다"고 판정하면 오탐이다.
+_STOMP_PATTERN = re.compile(r"밟으면|밟아|위에서\s*누르|stomp|jump\s*on", re.I)
+# 소멸이 옳은 신호가 아닌 요청. 깃발은 클리어 상태를 만들지 소멸하지 않는다.
+_NON_VANISH_OUTCOME = re.compile(r"클리어|clear|체력|hp|목숨|life|lives|게임\s*오버", re.I)
+# 이 기울기를 넘으면 캡슐이 누워 세로 반폭이 절반이 되고, 호스트는 구간 양 끝에서만
+# 형상을 재므로 겹침을 과장한다. 그런 실행은 판정하지 않는다(v1.11.32).
+_CONTACT_TILT_LIMIT = 15.0
+# 회전이 잠긴 스윕에서 경계는 0이었다 — +0.100 안 사라짐, −0.050 사라짐, −0.198 사라짐.
+# 판정은 그 경계에서 한참 안쪽으로 들어온 것만 한다.
+_CONTACT_OVERLAP_LIMIT = -0.25
+
 _AUTONOMOUS_WORDS = (
     "순찰", "patrol", "자동으로 움직", "자동 이동", "스스로 움직", "혼자 움직",
     "왔다갔다", "왔다 갔다", "자동으로 좌우", "자동 순찰",
@@ -470,6 +485,7 @@ class VerificationSpec:
     require_scene_objects: bool = False
     # 입력 없이 스스로 움직여야 하는 대상이 실제로 움직이는지.
     require_autonomous_motion: bool = False
+    require_contact_vanish: bool = False
     autonomous_duration: float = 0.8
     autonomous_min_distance: float = 0.15
     # 렌더러 없는 Player가 verified로 나간 적이 있다(영수증 20260731_033338_195).
@@ -589,6 +605,14 @@ class VerificationSpec:
             ),
             build_requested=build,
             require_autonomous_motion=_has_word(lower, _AUTONOMOUS_WORDS),
+            # "닿으면 사라진다"만 잰다. 밟기는 호스트가 못 만들고, 클리어·체력은
+            # 소멸이 옳은 신호가 아니다(STATUS A0의 2·3번).
+            require_contact_vanish=(
+                bool(_TOUCH_PATTERN.search(request))
+                and bool(_VANISH_PATTERN.search(request))
+                and not _STOMP_PATTERN.search(request)
+                and not _NON_VANISH_OUTCOME.search(request)
+            ),
             require_scene_objects=scene_objects,
             # Player 컴포넌트를 요구하는 요청은 그 Player가 화면에 보여야 한다.
             require_visible_player="Player" in components,
@@ -634,6 +658,7 @@ class VerificationSpec:
             ("player_visible", self.require_visible_player),
             ("gameplay", self.require_gameplay),
             ("autonomous_motion", self.require_autonomous_motion),
+            ("contact_vanish", self.require_contact_vanish),
             ("movement", self.require_movement),
             ("bidirectional", self.require_bidirectional),
             ("idle_stability", self.require_idle_stability),
@@ -1259,6 +1284,44 @@ class VerificationContract:
                 fallen.append(name)
         return fallen
 
+    def unreacted_contacts(self) -> list[str]:
+        """플레이어가 뚫고 지나갔는데 반응이 없는 접촉 대상 (A0).
+
+        v1.11.23부터 여섯 사이클을 기록만 하던 것을 판정으로 올린다. 근거는 회전을
+        잠근 통제 스윕이다 — 같은 씬에서 아이템 높이만 바꿨다.
+
+        ```text
+        간격 +0.100  사라짐 False
+        간격 −0.050  사라짐 True
+        간격 −0.198  사라짐 True
+        ```
+
+        **경계는 0이다.** 그래도 판정은 −0.25보다 안쪽만 한다. 경계 근처를 실패로
+        만들면 정상 씬이 떨어진다.
+
+        **기운 실행은 판정하지 않는다.** 캡슐이 누우면 세로 반폭이 절반이 되는데
+        호스트는 구간 양 끝에서만 형상을 재므로 겹침을 과장한다. 회전이 자유로운
+        같은 씬이 간격 −0.199에서 획득에 실패했고, 잠그자 −0.198에서 성공했다.
+        """
+        if not self.spec.require_contact_vanish:
+            return []
+        tilt = self.player_max_tilt
+        if tilt is None or tilt > _CONTACT_TILT_LIMIT:
+            return []
+        missed = []
+        for name, before in self.contact_before.items():
+            if not self._object_scripts(name):
+                continue
+            after = self.contact_after.get(name)
+            if after is None:
+                continue
+            if contact_already_gone(after):
+                continue
+            gap = self.surface_gap(before.get("position"), before.get("scale"), name)
+            if gap is not None and gap < _CONTACT_OVERLAP_LIMIT:
+                missed.append(name)
+        return missed
+
     def _trigger_collider_seen(self, target: str) -> bool | None:
         """이 오브젝트에 트리거 콜라이더가 있는가. `None`이면 판별 불가.
 
@@ -1565,6 +1628,8 @@ class VerificationContract:
                 failed.append(f"trigger_handler_without_trigger_collider:{name}")
             for name in self.fallen_contact_objects():
                 failed.append(f"contact_object_fell_away:{name}")
+            for name in self.unreacted_contacts():
+                failed.append(f"contact_target_did_not_react:{name}")
         if self.spec.require_level_marker and not self.level_marker_seen:
             failed.append("level_loaded_marker_missing")
         if self.spec.require_autonomous_motion:
@@ -1749,6 +1814,12 @@ class VerificationContract:
             "scene_objects": self.hierarchy_seen,
             "player_visible": self._player_renderer_seen() is not None,
             "autonomous_motion": self.autonomous_motion_delta() is not None,
+            # 기운 실행에서는 겹침이 과장되므로 판정하지 않는다. 그것을 "측정했다"고
+            # 적으면 v1.11.2가 막은 공집합 성공이 다른 이름으로 돌아온다.
+            "contact_vanish": bool(self.contact_after) and (
+                self.player_max_tilt is not None
+                and self.player_max_tilt <= _CONTACT_TILT_LIMIT
+            ),
             "gameplay": self.played and self.waited and self.runtime_checked,
             "movement": pair(self.motion_before, self.motion_after, "rightArrow")
                         or (self.movement_before is not None
@@ -1879,6 +1950,7 @@ class VerificationContract:
 _FAILURE_CHECK_PREFIXES = (
     ("scene_has_no_created_objects", "scene_objects"),
     ("scene_contents_not_observed", "scene_objects"),
+    ("contact_target_did_not_react", "contact_vanish"),
     ("trigger_handler_without_trigger_collider", "gameplay"),
     ("contact_object_fell_away", "gameplay"),
     ("no_object_moved_on_its_own", "autonomous_motion"),
@@ -2029,6 +2101,16 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
                 "설정한다(unity_set_component_property로 SphereCollider·BoxCollider의 "
                 "isTrigger). 플레이어 쪽 콜라이더는 트리거로 만들지 않는다 — "
                 "바닥을 통과해 떨어진다."
+            )
+        if "contact_target_did_not_react:" in failure:
+            lint_guidance.append(
+                "- contact_target_did_not_react: 플레이어가 그 오브젝트를 뚫고 "
+                "지나갔는데 아무 일도 일어나지 않았다. 획득 처리가 실제로 씬에 "
+                "연결됐는지 본다 — 스크립트를 썼지만 unity_add_component를 안 했거나, "
+                "트리거가 아니거나, 상대를 CompareTag로 식별하고 있을 수 있다(이 "
+                "세션에는 태그를 설정하는 도구가 없어 그 분기는 영원히 거짓이다). "
+                "상대는 GetComponent<T>()로 식별하고, 대상 콜라이더의 isTrigger를 "
+                "true로 둔다."
             )
         if "contact_object_fell_away:" in failure:
             lint_guidance.append(
