@@ -2029,13 +2029,32 @@ class ContactCandidateRecordingTests(unittest.TestCase):
 
     def test_the_half_extent_follows_the_direction_of_approach(self):
         """납작한 바닥은 위에서 볼 때와 옆에서 볼 때 반폭이 다르다."""
-        floor = (10.0, 1.0, 10.0)
+        floor = (5.0, 0.5, 5.0)   # 10×1×10 바닥의 반폭
         self.assertAlmostEqual(
             VerificationContract._box_radius(floor, (0.0, 1.0, 0.0)), 0.5, places=3
         )
         self.assertAlmostEqual(
             VerificationContract._box_radius(floor, (1.0, 0.0, 0.0)), 5.0, places=3
         )
+
+    def test_measured_collider_extents_beat_the_scale_guess(self):
+        """Unity 캡슐은 scale 1에서 높이가 2다. localScale로 추정하면 세로가 절반이다.
+
+        플레이어는 거의 항상 캡슐이므로 그 오차가 모든 접촉 거리에 실려 있었다.
+        """
+        contract = self._contract({}, {}, samples=())
+        contract.observe("unity_get_gameobject", {"target": "Player"}, result({
+            "name": "Player", "activeSelf": True,
+            "transform": {"position": [0.0, 1.0, 0.0], "localScale": [1.0, 1.0, 1.0]},
+            "components": [{"type": "UnityEngine.CapsuleCollider",
+                            "data": {"isTrigger": False, "enabled": True,
+                                     "extents": [0.5, 1.0, 0.5]}}],
+        }))
+        self.assertEqual(contract.latest_extents["player"], (0.5, 1.0, 0.5))
+        # 추정(0.5)이 아니라 실측(1.0)이 쓰인다
+        self.assertEqual(contract._half_extents("Player", (1.0, 1.0, 1.0)), (0.5, 1.0, 0.5))
+        # 콜라이더를 못 본 오브젝트는 예전대로 localScale의 절반
+        self.assertEqual(contract._half_extents("Coin", (1.0, 1.0, 1.0)), (0.5, 0.5, 0.5))
 
     def test_the_scale_comes_from_the_observed_transform(self):
         contract = self._contract({}, {}, samples=())
@@ -2156,6 +2175,17 @@ class ContactWiringTests(unittest.TestCase):
         self._see_collider(contract, "Item", "SphereCollider", False)
         self._see_collider(contract, "Player", "CapsuleCollider", False)
         self.assertEqual(contract.dead_trigger_handlers(), [])
+
+    def test_a_script_from_an_earlier_session_is_read_too(self):
+        """`--repair-existing`은 빌더를 건너뛰어 session_scripts가 비어 있다.
+
+        그것만 보면 기존 씬을 재검증할 때 검사가 조용히 꺼진다.
+        """
+        contract = self._contract()
+        contract.session_scripts.clear()
+        self._see_collider(contract, "Item", "SphereCollider", False)
+        self._see_collider(contract, "Player", "CapsuleCollider", False)
+        self.assertEqual(contract.dead_trigger_handlers(), ["Item"])
 
     def test_an_unobserved_collider_is_not_a_failure(self):
         """모르는 것을 근거로 실패시키지 않는다 — 구버전 브리지는 isTrigger를 안 준다."""

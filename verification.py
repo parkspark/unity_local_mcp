@@ -332,6 +332,38 @@ def _scale(value: dict) -> tuple[float, float, float] | None:
         return None
 
 
+def _collider_extents(value: dict) -> tuple[float, float, float] | None:
+    """가장 큰 콜라이더의 월드 AABB 반폭.
+
+    `localScale`로 크기를 추정하면 프리미티브마다 틀린다 — Unity 캡슐은 `scale` 1에서
+    **높이가 2**라 세로 반폭이 0.5가 아니라 1.0이다. 플레이어는 거의 항상 캡슐이므로
+    그 오차가 모든 접촉 거리에 실렸다. `bounds`는 스케일·회전·오프셋이 이미 반영된
+    값이라 추정이 필요 없다.
+
+    콜라이더가 여럿이면 가장 큰 것을 쓴다 — 접촉은 어느 하나라도 닿으면 일어난다.
+    """
+    components = value.get("components")
+    if not isinstance(components, list):
+        return None
+    best = None
+    for item in components:
+        if not isinstance(item, dict):
+            continue
+        if not str(item.get("type", "")).lower().split(".")[-1].endswith("collider"):
+            continue
+        data = item.get("data")
+        raw = data.get("extents") if isinstance(data, dict) else None
+        if not isinstance(raw, list) or len(raw) != 3:
+            continue
+        try:
+            half = tuple(abs(float(v)) for v in raw)
+        except (TypeError, ValueError):
+            continue
+        if best is None or sum(half) > sum(best):
+            best = half
+    return best
+
+
 def contact_already_gone(sample: dict | None) -> bool:
     """이 접촉 표본이 이미 "사라짐"을 담고 있는가.
 
@@ -720,6 +752,9 @@ class VerificationContract:
     latest_scales: dict[str, tuple[float, float, float]] = field(default_factory=dict)
     # 측정 내내 관측된 최저 높이. 낙하는 재시작으로 되돌아가므로 마지막 값에 안 남는다.
     lowest_y: dict[str, float] = field(default_factory=dict)
+    # 콜라이더 월드 AABB의 반폭. `localScale`은 프리미티브마다 뜻이 달라
+    # (캡슐은 scale 1에서 높이 2) 추정이 빗나간다. 있으면 이쪽을 쓴다.
+    latest_extents: dict[str, tuple[float, float, float]] = field(default_factory=dict)
     # 검증이 실제로 플레이어를 데려간 모든 지점. 접촉 판단의 원자료다.
     player_samples: list = field(default_factory=list)
     movement_before: tuple[float, float, float] | None = None
@@ -896,6 +931,9 @@ class VerificationContract:
             scale = _scale(data)
             if scale is not None:
                 self.latest_scales[target.lower()] = scale
+            extents = _collider_extents(data)
+            if extents is not None:
+                self.latest_extents[target.lower()] = extents
             if pos is not None:
                 self.latest_positions[target.lower()] = pos
                 # 트리거 콜라이더는 바닥과 충돌하지 않는다. 거기에 Rigidbody가 붙으면
@@ -1029,8 +1067,21 @@ class VerificationContract:
         closest = cls._closest_point_on_segment(pos, start, end)
         return sum((p - c) ** 2 for p, c in zip(pos, closest)) ** 0.5
 
+    def _half_extents(self, name: str, scale) -> tuple | None:
+        """이 오브젝트의 반폭. 콜라이더 실측이 있으면 그것을, 없으면 `localScale`을.
+
+        브리지가 `bounds.extents`를 내주기 시작한 것이 v1.11.31이다. 그 이전 응답과
+        콜라이더 없는 오브젝트에서는 예전대로 `localScale`의 절반을 쓴다.
+        """
+        measured = self.latest_extents.get(str(name).lower())
+        if measured is not None:
+            return measured
+        if scale is None:
+            return None
+        return tuple(abs(v) / 2.0 for v in scale)
+
     @staticmethod
-    def _box_radius(scale, direction) -> float | None:
+    def _box_radius(half, direction) -> float | None:
         """중심에서 상자 표면까지, 주어진 방향으로 잰 거리.
 
         접촉은 중심이 아니라 표면에서 일어난다. 축 정렬 상자에서 중심을 지나는
@@ -1042,9 +1093,9 @@ class VerificationContract:
         상자까지 정확히 재려면 방향 벡터를 로컬 축으로 옮겨야 한다. 회전한 오브젝트에서
         이 값은 과소평가(= 간격 과대평가)이므로 접촉을 없다고 지어내지는 않는다.
         """
-        if scale is None:
+        if half is None:
             return None
-        half = [abs(v) / 2.0 for v in scale]
+        half = [abs(v) for v in half]
         length = sum(v * v for v in direction) ** 0.5
         if length <= 1e-9:
             return min(half)
@@ -1075,15 +1126,16 @@ class VerificationContract:
         approach = self.nearest_player_approach(pos)
         return None if approach is None else approach[0]
 
-    def surface_gap(self, pos, scale) -> float | None:
+    def surface_gap(self, pos, scale, name: str = "") -> float | None:
         """표면끼리의 간격. 음수면 겹쳐 있었다는 뜻이다.
 
         중심 거리는 크기를 모르면 읽을 수 없다 — 1×1×1 플레이어와 0.5짜리 코인은
         **맞닿은 순간 중심 거리가 0.75**다. A0의 표본에서 경로 바로 위의 `Item`이
         0.773으로 기록돼 "안 닿았다"처럼 보였던 것이 정확히 이 값이다.
         """
-        player_scale = self.latest_scales.get("player")
-        if pos is None or scale is None or player_scale is None:
+        object_half = self._half_extents(name, scale)
+        player_half = self._half_extents("player", self.latest_scales.get("player"))
+        if pos is None or object_half is None or player_half is None:
             return None
         approach = self.nearest_player_approach(pos)
         if approach is None:
@@ -1091,8 +1143,8 @@ class VerificationContract:
         distance, player_point = approach
         towards_object = [p - c for p, c in zip(pos, player_point)]
         towards_player = [-v for v in towards_object]
-        object_radius = self._box_radius(scale, towards_player)
-        player_radius = self._box_radius(player_scale, towards_object)
+        object_radius = self._box_radius(object_half, towards_player)
+        player_radius = self._box_radius(player_half, towards_object)
         if object_radius is None or player_radius is None:
             return None
         return distance - object_radius - player_radius
@@ -1129,7 +1181,7 @@ class VerificationContract:
                 )
             distance = self.nearest_player_distance(pos)
             scale = before.get("scale")
-            gap = self.surface_gap(pos, scale)
+            gap = self.surface_gap(pos, scale, name)
             report.append({
                 "object": name,
                 "position": [round(v, 3) for v in pos] if pos else None,
@@ -1203,22 +1255,32 @@ class VerificationContract:
         요청 어휘가 아니라 **빌더가 실제로 쓴 코드**를 근거로 삼는다. 핸들러를
         달았다는 것은 트리거 의미론을 의도했다는 뜻이고, 트리거가 없으면 그 분기는
         영원히 죽는다. `OnCollisionEnter`로 구현한 정상적인 획득은 걸리지 않는다.
+
+        `session_scripts`만 보면 **`--repair-existing`에서 조용히 꺼진다** — 빌더
+        단계를 건너뛰면 그 집합이 비어 있다. 이 저장소는 클래스 이름이 곧 파일
+        이름이고 스크립트는 `Assets/Scripts/`에 둔다는 규칙을 강제하므로, 붙어 있는
+        컴포넌트 이름으로 그 경로를 함께 본다.
         """
         attached = {item.lower() for item in self._object_scripts(name)}
         if not attached:
             return []
+        candidates = {
+            str(path) for path in self.session_scripts
+            if os.path.splitext(os.path.basename(str(path)))[0].lower() in attached
+        }
+        candidates |= {
+            f"Assets/Scripts/{item}.cs" for item in self._object_scripts(name)
+        }
         found = []
-        for path in sorted(self.session_scripts):
-            stem = os.path.splitext(os.path.basename(str(path)))[0]
-            if stem.lower() not in attached:
-                continue
+        for path in sorted(candidates):
+            stem = os.path.splitext(os.path.basename(path))[0]
             try:
-                with open(os.path.join(self.project_dir, str(path)),
+                with open(os.path.join(self.project_dir, path),
                           encoding="utf-8", errors="replace") as handle:
                     text = handle.read()
             except OSError:
                 continue
-            if "OnTriggerEnter" in text:
+            if "OnTriggerEnter" in text and stem not in found:
                 found.append(stem)
         return found
 
