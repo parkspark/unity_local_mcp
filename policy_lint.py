@@ -99,6 +99,32 @@ def _zeroes_horizontal_when_idle(code: str) -> bool:
     return False
 
 
+_REMEMBERS_START = re.compile(r"(\w+)\s*=\s*transform\s*\.\s*position\b")
+
+
+def _respawns_on_fall(code: str) -> bool:
+    """떨어지면 시작 위치로 되돌리는가.
+
+    **변수 이름이 아니라 동작을 본다.** 예전 규칙은 식별자 `spawnPosition`이 코드에
+    문자 그대로 있을 것을 요구했다. 모델이 `startPosition`·`initialPos` 같은 이름을
+    쓰면 아무리 옳게 구현해도 통과할 수 없다 — 영수증 재생에서 이 규칙은 **5회 등장
+    중 3회가 repair 2사이클 이상을 그대로 통과**한 최대 비수렴 규칙이었다.
+
+    필요한 것은 셋이다: 시작 위치를 어딘가에 기억하고, 높이를 견주고, 그 기억한
+    값으로 되돌린다.
+    """
+    remembered = set(_REMEMBERS_START.findall(code))
+    if not remembered:
+        return False
+    restored = any(
+        re.search(rf"transform\s*\.\s*position\s*=\s*{re.escape(name)}\b", code)
+        for name in remembered
+    )
+    if not restored:
+        return False
+    return bool(re.search(r"\.\s*y\s*<", code) or re.search(r"\.\s*y\s*<=", code))
+
+
 def lint_scripts(request: str, asset_paths: list[str], project_dir: str) -> list[str]:
     lower = request.lower()
     violations: list[str] = []
@@ -134,9 +160,7 @@ def lint_scripts(request: str, asset_paths: list[str], project_dir: str) -> list
             if tag not in defined_tags:
                 violations.append(f"undefined_compare_tag:{relative}:{tag}")
         if "낙사 시 시작 위치로 복귀" in lower and "PlayerMovement" in filename:
-            if "spawnPosition" not in code or not re.search(
-                r"(?:transform\.position\.y|transform\.position\s*\.\s*y)", code
-            ):
+            if not _respawns_on_fall(code):
                 violations.append(f"fall_respawn_check_missing:{relative}")
         if "무입력 0.5초" in lower and "PlayerMovement" in filename:
             if (

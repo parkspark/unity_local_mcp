@@ -784,3 +784,19 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           전부 측정됐습니다. 아울러 계획 강등의 네 경로가 전부 이유를 남기게 했고,
           그 첫 수확으로 **모델이 2/2로 계획을 거부한다**는 것이 드러났습니다.
           상세: [docs/v1.12.0_long_command_reaches_the_end.md](docs/v1.12.0_long_command_reaches_the_end.md)
+
+- ver 1.12.1 - **계획이 중단되지 않고, 규칙이 철자 대신 동작을 봅니다.** v1.12.0이
+          계획 모드를 켜자 예상하던 결함이 라이브로 재현됐습니다 — m3이 실패하자
+          **m4·m5가 통째로 날아갔습니다.** 둘 다 실패한 마일스톤에 의존하지
+          않는데도요. 이제 실패를 기록하고 다음 마일스톤을 계속합니다(예산이
+          바닥나면 멈추는 가드는 그대로). 그리고 영수증 145건에서 **어떤 규칙이
+          repair를 2사이클 이상 그대로 통과하는지**(모델이 못 고치는지) 세어
+          `fall_respawn_check_missing`이 5회 중 3회로 최대 비수렴 규칙임을
+          찾았습니다 — 원인은 **식별자 `spawnPosition`을 문자 그대로 요구**하는
+          것이었습니다. `idle_velocity_not_zeroed`도 같은 부류로, 모델이 **"to
+          satisfy policy check"라는 주석까지 달아 가며** 쓴 코드를 한 가지 철자가
+          아니라는 이유로 거부하고 있었습니다. 둘 다 동작을 보도록 바꿨습니다.
+          결과: 계획 모드 3회에서 **중단 → 4/5 실행 → 5/5 실행·3개 완료**로
+          움직였고, 이제 측정을 막는 것은 규칙 충돌이 아니라 **진짜 게임 결함**
+          (`player_fell_during_spawn_check`)입니다.
+          상세: [docs/v1.12.1_plan_continues_and_rules_stop_checking_spelling.md](docs/v1.12.1_plan_continues_and_rules_stop_checking_spelling.md)

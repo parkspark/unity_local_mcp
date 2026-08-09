@@ -2692,3 +2692,48 @@ class IdleVelocityRuleTests(unittest.TestCase):
             "rb.linearVelocity = velocity;"
         )
         self.assertIn(f"idle_velocity_not_zeroed:{path}", violations)
+
+
+class FallRespawnRuleTests(unittest.TestCase):
+    """규칙이 변수 이름을 요구하면 옳은 구현도 통과할 수 없다.
+
+    예전 규칙은 식별자 `spawnPosition`이 문자 그대로 있을 것을 요구했다. 영수증
+    재생에서 이 규칙은 **5회 등장 중 3회가 repair 2사이클 이상을 그대로 통과**한
+    최대 비수렴 규칙이었다.
+    """
+
+    def _violations(self, body):
+        with tempfile.TemporaryDirectory() as project:
+            os.makedirs(os.path.join(project, "Assets", "Scripts"))
+            path = "Assets/Scripts/PlayerMovement25D.cs"
+            with open(os.path.join(project, path), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "using UnityEngine; public class PlayerMovement25D : MonoBehaviour {"
+                    + body + " }"
+                )
+            return lint_scripts("낙사 시 시작 위치로 복귀", [path], project), path
+
+    def test_any_identifier_passes_when_the_behaviour_is_there(self):
+        names = ("spawnPosition", "startPosition", "initialPos", "_home")
+        for name in names:
+            with self.subTest(name):
+                body = (
+                    f"Vector3 {name}; void Start() {{ {name} = transform.position; }} "
+                    f"void Update() {{ if (transform.position.y < -10f) "
+                    f"{{ transform.position = {name}; }} }}"
+                )
+                violations, path = self._violations(body)
+                self.assertNotIn(f"fall_respawn_check_missing:{path}", violations)
+
+    def test_remembering_without_restoring_still_fails(self):
+        body = (
+            "Vector3 home; void Start() { home = transform.position; } "
+            "void Update() { if (transform.position.y < -10f) { } }"
+        )
+        violations, path = self._violations(body)
+        self.assertIn(f"fall_respawn_check_missing:{path}", violations)
+
+    def test_no_respawn_at_all_still_fails(self):
+        body = "void Update() { }"
+        violations, path = self._violations(body)
+        self.assertIn(f"fall_respawn_check_missing:{path}", violations)
