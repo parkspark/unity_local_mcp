@@ -195,8 +195,16 @@ def _extract_json(text: str) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-async def make_plan(client, model: str, request: str, on_warn=lambda m: None) -> Plan | None:
-    """도구 없는 별도 호출로 계획 JSON을 받는다. 실패 시 None(단일 루프 강등)."""
+async def make_plan(
+    client, model: str, request: str, on_warn=lambda m: None,
+    on_reason=lambda code, detail=None: None,
+) -> Plan | None:
+    """도구 없는 별도 호출로 계획 JSON을 받는다. 실패 시 None(단일 루프 강등).
+
+    **강등에는 반드시 이유가 남는다.** `mode: "single"`을 모델이 고르는 경로가
+    유일하게 조용했고, 그래서 큰 요청이 단일 루프로 떨어져도 로그에 흔적이 없었다
+    (`20260809_123343` — 플랫포머 한 스테이지 요청이 계획 없이 돌았다).
+    """
     messages = [
         {"role": "system", "content": PLANNER_PROMPT},
         {"role": "user", "content": request},
@@ -212,6 +220,7 @@ async def make_plan(client, model: str, request: str, on_warn=lambda m: None) ->
             )
         except Exception as e:
             on_warn(f"플래닝 호출 실패({type(e).__name__}: {e}) — 단일 루프로 진행합니다.")
+            on_reason("planner_call_failed", f"{type(e).__name__}: {e}")
             return None
         content = resp.message.content or ""
         try:
@@ -220,14 +229,23 @@ async def make_plan(client, model: str, request: str, on_warn=lambda m: None) ->
             data = _extract_json(content)
         if isinstance(data, dict):
             if data.get("mode") == "single":
+                on_warn(
+                    "모델이 이 요청을 단일 작업으로 판단했습니다 — 계획 없이 진행합니다."
+                )
+                on_reason("model_chose_single")
                 return None
             plan = validate_plan(data)
             if plan is not None:
                 plan.request = request
-                return _prune_unrequested_level_system(plan, request, on_warn)
+                pruned = _prune_unrequested_level_system(plan, request, on_warn)
+                if pruned is None:
+                    on_warn("남은 마일스톤이 2개 미만이라 단일 루프로 진행합니다.")
+                    on_reason("pruned_below_minimum")
+                return pruned
         if attempt == 0:
             on_warn("계획 JSON이 유효하지 않아 한 번 더 시도합니다.")
     on_warn("계획을 만들지 못했습니다 — 단일 루프로 진행합니다.")
+    on_reason("invalid_plan_json")
     return None
 
 

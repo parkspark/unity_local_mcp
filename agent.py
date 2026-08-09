@@ -243,6 +243,9 @@ class Agent:
         self.last_run_log_paths: tuple[str, str] | None = None
         self.last_verification_receipt_path: str | None = None
         self.known_session_scripts: set[str] = set()
+        # 계획 강등 사유. 큰 요청이 계획 없이 도는 것은 결과가 완전히 다르므로
+        # `execution_mode` 이벤트에 함께 남긴다.
+        self._planner_degraded: str | None = None
         self._active_tool_mode = "full"
         self._verify_entered_play = False
         self._suppress_text = False
@@ -582,13 +585,23 @@ class Agent:
     async def _execute_requested_work(self, user_text: str, active_tool_mode: str) -> bool:
         """Run the v1.8 builder. Its prose is provisional under v1.9."""
         plan = None
+        planning_attempted = False
+        self._planner_degraded = None
         if active_tool_mode != "verify" and config.PLANNER != "off" and (
             config.PLANNER == "always" or planner.looks_large(user_text)
         ):
+            planning_attempted = True
             self.on_warn("큰 요청으로 판단해 실행 계획을 먼저 세웁니다...")
             plan = await self._make_plan(user_text)
         if plan is None:
-            self._log("execution_mode", mode="single", tool_mode=active_tool_mode)
+            # 큰 요청으로 판단해 놓고 계획 없이 도는 것은 결과가 완전히 다르다.
+            # 그 강등이 로그에 안 남아 있어서, 플랫포머 요청이 계획 없이 돈 것을
+            # 사후에 알 방법이 없었다(`20260809_123343`).
+            self._log(
+                "execution_mode", mode="single", tool_mode=active_tool_mode,
+                planning_attempted=planning_attempted,
+                degraded_reason=self._planner_degraded,
+            )
             return await self._run_single(user_text)
         self._log(
             "execution_mode",
@@ -613,7 +626,13 @@ class Agent:
 
     async def _make_plan(self, user_text: str):
         """플래닝 호출 래퍼 (테스트에서 오버라이드 지점)."""
-        return await planner.make_plan(self.client, self.model, user_text, self.on_warn)
+        def remember(code: str, detail: str | None = None) -> None:
+            self._planner_degraded = code if not detail else f"{code}:{detail}"
+            self._log("planner_degraded", reason=code, detail=detail)
+
+        return await planner.make_plan(
+            self.client, self.model, user_text, self.on_warn, remember
+        )
 
     async def _verification_call(self, contract: VerificationContract,
                                  name: str, args: dict) -> str:

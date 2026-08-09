@@ -644,7 +644,21 @@ class TaskContract:
                     if "keyboard.current" not in lowered_content:
                         missing_patterns.append("Keyboard.current")
                     if "linearvelocity" not in lowered_content:
-                        missing_patterns.append("Rigidbody.linearVelocity")
+                        # 모델이 `rb.velocity`를 쓰면 "Rigidbody.linearVelocity가
+                        # 없다"는 말이 무엇을 고치라는 것인지 알려 주지 못한다.
+                        # 실측(20260809_123343): 차단 21회 중 15회가 이 한 항목이었고
+                        # 그 실행의 스크립트 쓰기 24회 중 17회가 `rb.velocity`였다.
+                        # 모델의 학습 데이터가 Unity 6 이전이라 옛 이름으로 수렴한다.
+                        # 무엇을 썼는지 지목해 준다.
+                        if re.search(r"\.\s*velocity\b", content):
+                            missing_patterns.append(
+                                "Rigidbody.linearVelocity — you wrote `.velocity`, "
+                                "which Unity 6 renamed. Rename every `.velocity` "
+                                "to `.linearVelocity`; nothing else about the line "
+                                "changes"
+                            )
+                        else:
+                            missing_patterns.append("Rigidbody.linearVelocity")
                     # The undefined tag is a property of the scene, not of the
                     # jump: a fresh scene defines no custom Ground tag and
                     # CompareTag throws at runtime whoever calls it. Nesting this

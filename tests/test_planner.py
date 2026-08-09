@@ -1,3 +1,4 @@
+import json
 import unittest
 
 import config
@@ -129,3 +130,54 @@ class LedgerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DegradationIsRecordedTests(unittest.IsolatedAsyncioTestCase):
+    """큰 요청이 계획 없이 도는 것은 결과가 완전히 다른데 흔적이 없었다.
+
+    `20260809_123343` — 플랫포머 한 스테이지 요청이 "큰 요청으로 판단해 실행
+    계획을 먼저 세웁니다"를 찍고도 `mode = single`로 돌았고, 로그에 이유가
+    없었다. 모델이 `mode: "single"`을 고르는 경로만 조용했다.
+    """
+
+    class _Resp:
+        def __init__(self, content):
+            self.message = type("M", (), {"content": content})()
+
+    class _Client:
+        def __init__(self, content):
+            self._content = content
+
+        async def chat(self, **kwargs):
+            return DegradationIsRecordedTests._Resp(self._content)
+
+    async def _reasons(self, content):
+        seen = []
+        plan = await planner.make_plan(
+            self._Client(content), "m", "플랫포머 한 스테이지를 만들어줘",
+            lambda msg: None, lambda code, detail=None: seen.append(code),
+        )
+        return plan, seen
+
+    async def test_the_model_opting_out_is_recorded(self):
+        plan, seen = await self._reasons('{"mode": "single", "milestones": []}')
+        self.assertIsNone(plan)
+        self.assertEqual(seen, ["model_chose_single"])
+
+    async def test_unusable_json_is_recorded(self):
+        plan, seen = await self._reasons("not json at all")
+        self.assertIsNone(plan)
+        self.assertEqual(seen[-1], "invalid_plan_json")
+
+    async def test_a_usable_plan_records_nothing(self):
+        plan, seen = await self._reasons(json.dumps({
+            "mode": "plan",
+            "milestones": [
+                _milestone_dict(title="씬 만들기", deliverables=[],
+                                goal="새 씬을 만든다", verify=["scene"]),
+                _milestone_dict(title="플레이어 이동", deliverables=[],
+                                goal="이동 스크립트를 쓴다", verify=["compile"]),
+            ],
+        }))
+        self.assertIsNotNone(plan)
+        self.assertEqual(seen, [])

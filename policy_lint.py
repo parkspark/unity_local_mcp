@@ -40,6 +40,37 @@ def _defined_tags(project_dir: str) -> set[str]:
     return tags
 
 
+_KEYBOARD_BINDING = re.compile(
+    r"(?:var|Keyboard)\s+(\w+)\s*=\s*Keyboard\s*\.\s*current", re.I
+)
+
+
+def _keyboard_null_checked(code: str) -> bool:
+    """`Keyboard.current`의 null 검사가 있는가.
+
+    직접 비교(`Keyboard.current == null`)만 인정하면 **호스트의 다른 규칙과
+    충돌한다.** `task_contract`의 교정 스니펫이 가르치는 형태가 정확히 지역
+    변수를 거치는 쪽이기 때문이다.
+
+        var keyboard = Keyboard.current;
+        if (keyboard == null) return;
+
+    게이트는 A를 가르치고 린트는 B를 요구하니 repair가 수렴할 수 없었다 —
+    실측 `20260809_124847`에서 이 위반이 repair 3사이클을 그대로 통과해
+    Play Mode 측정이 전부 blocked됐다.
+    """
+    if re.search(r"Keyboard\s*\.\s*current\s*(?:==\s*null|is\s+null)", code):
+        return True
+    for name in set(_KEYBOARD_BINDING.findall(code)):
+        if re.search(
+            rf"\b{re.escape(name)}\b\s*(?:==|!=)\s*null|\b{re.escape(name)}\b\s+is\s+"
+            rf"(?:not\s+)?null",
+            code,
+        ):
+            return True
+    return False
+
+
 def lint_scripts(request: str, asset_paths: list[str], project_dir: str) -> list[str]:
     lower = request.lower()
     violations: list[str] = []
@@ -63,7 +94,7 @@ def lint_scripts(request: str, asset_paths: list[str], project_dir: str) -> list
         if "keyboard.current" in lower and "PlayerMovement" in filename:
             if "Keyboard.current" not in code:
                 violations.append(f"keyboard_current_missing:{relative}")
-            elif not re.search(r"Keyboard\.current\s*(?:==\s*null|is\s+null)", code):
+            elif not _keyboard_null_checked(code):
                 violations.append(f"keyboard_null_check_missing:{relative}")
         if "rigidbody.linearvelocity" in lower and "PlayerMovement" in filename:
             if ".linearVelocity" not in code:

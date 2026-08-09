@@ -183,6 +183,47 @@ class TaskContractTests(unittest.TestCase):
         )
         self.assertTrue(contract.camera_requested)
 
+    def test_the_old_velocity_name_is_pointed_at_by_name(self):
+        """모델이 `rb.velocity`로 수렴해 예산을 태운다.
+
+        실측(`20260809_123343`): 입력 게이트 차단 21회 중 **15회가 같은 항목**
+        (`Rigidbody.linearVelocity`)이었고, 그 실행의 스크립트 쓰기 24회 중
+        **17회가 `rb.velocity`**였다. 학습 데이터가 Unity 6 이전이라 옛 이름으로
+        돌아온다. "linearVelocity가 없다"만으로는 무엇을 고칠지 알려 주지 못한다.
+        """
+        contract = TaskContract.from_request(
+            "New Input System으로 A/D 이동과 Space 점프를 구현해줘"
+        )
+        old_name = {
+            "path": "Assets/Scripts/PlayerMovement.cs",
+            "content": (
+                "using UnityEngine.InputSystem; class PlayerMovement { Rigidbody rb; "
+                "void Update() { var keyboard = Keyboard.current; if (keyboard == null) return; "
+                "rb.velocity = new Vector3(1, rb.velocity.y, 0); } }"
+            ),
+        }
+        _, error = contract.prepare_call("unity_write_script", old_name)
+        self.assertIn("you wrote `.velocity`", error)
+        self.assertIn("Unity 6 renamed", error)
+        # 지목이 붙어도 기존 코드 스니펫은 그대로 따라붙어야 한다
+        self.assertIn("linearVelocity", error)
+
+    def test_a_script_that_never_touches_velocity_keeps_the_plain_label(self):
+        contract = TaskContract.from_request(
+            "New Input System으로 A/D 이동과 Space 점프를 구현해줘"
+        )
+        no_velocity = {
+            "path": "Assets/Scripts/PlayerMovement.cs",
+            "content": (
+                "using UnityEngine.InputSystem; class PlayerMovement { Rigidbody rb; "
+                "void Update() { var keyboard = Keyboard.current; if (keyboard == null) return; "
+                "transform.Translate(Vector3.right); } }"
+            ),
+        }
+        _, error = contract.prepare_call("unity_write_script", no_velocity)
+        self.assertIn("Rigidbody.linearVelocity", error)
+        self.assertNotIn("you wrote", error)
+
     def test_explicit_simple_keys_require_direct_keyboard_script(self):
         contract = TaskContract.from_request(
             "New Input System으로 A/D 이동과 Space 점프를 구현해줘"

@@ -435,6 +435,56 @@ class PolicyLintTests(unittest.TestCase):
             self.assertIn(f"undefined_compare_tag:{path}:Ground", violations)
             self.assertIn(f"fall_respawn_check_missing:{path}", violations)
 
+    def test_the_null_check_the_gate_teaches_satisfies_the_lint(self):
+        """호스트 규칙 둘이 서로 싸우고 있었다.
+
+        `task_contract`의 교정 스니펫은 지역 변수를 거치는 형태를 가르치는데
+        (`var keyboard = Keyboard.current; if (keyboard == null) return;`),
+        린트는 `Keyboard.current == null`이라는 문자 그대로의 형태만 인정했다.
+        게이트가 A를 가르치고 린트가 B를 요구하니 repair가 수렴할 수 없다 —
+        실측 `20260809_124847`에서 이 위반이 repair 3사이클을 그대로 통과해
+        Play Mode 측정이 전부 blocked됐다.
+        """
+        shapes = {
+            "게이트가 가르치는 형태": (
+                "var keyboard = Keyboard.current; if (keyboard == null) return;"
+            ),
+            "직접 비교": "if (Keyboard.current == null) return;",
+            "역방향 비교": "var kb = Keyboard.current; if (kb != null) { }",
+            "타입 선언": "Keyboard kb = Keyboard.current; if (kb is null) return;",
+        }
+        for label, body in shapes.items():
+            with self.subTest(label):
+                with tempfile.TemporaryDirectory() as project:
+                    scripts = os.path.join(project, "Assets", "Scripts")
+                    os.makedirs(scripts)
+                    path = "Assets/Scripts/PlayerMovement25D.cs"
+                    with open(os.path.join(project, path), "w", encoding="utf-8") as handle:
+                        handle.write(
+                            "using UnityEngine; public class PlayerMovement25D "
+                            ": MonoBehaviour { void Update() { " + body + " } }"
+                        )
+                    self.assertNotIn(
+                        f"keyboard_null_check_missing:{path}",
+                        lint_scripts("Keyboard.current", [path], project),
+                    )
+
+    def test_reading_the_keyboard_without_any_null_check_still_fails(self):
+        with tempfile.TemporaryDirectory() as project:
+            scripts = os.path.join(project, "Assets", "Scripts")
+            os.makedirs(scripts)
+            path = "Assets/Scripts/PlayerMovement25D.cs"
+            with open(os.path.join(project, path), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "using UnityEngine; public class PlayerMovement25D : MonoBehaviour {"
+                    "void Update() { var keyboard = Keyboard.current; "
+                    "float a = keyboard.dKey.isPressed ? 1f : 0f; } }"
+                )
+            self.assertIn(
+                f"keyboard_null_check_missing:{path}",
+                lint_scripts("Keyboard.current", [path], project),
+            )
+
     def test_camera_current_z_plus_offset_is_rejected(self):
         with tempfile.TemporaryDirectory() as project:
             scripts = os.path.join(project, "Assets", "Scripts")

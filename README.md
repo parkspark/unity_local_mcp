@@ -767,3 +767,20 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           호스트가 닿지 못했습니다(A0 커버리지의 상한). 그리고 `policy_lint` 위반
           하나가 전 단계를 blocked시키는 E3가 **오늘만 두 번** 났습니다.
           상세: [docs/v1.11.34_contact_vanish_false_positive_baseline.md](docs/v1.11.34_contact_vanish_false_positive_baseline.md)
+
+- ver 1.12.0 - **긴 명령이 끝까지 가지 못한 이유는 호스트 규칙끼리의 충돌이었습니다.**
+          "플랫포머 한 스테이지를 만들어줘"를 기준선으로 3회 돌렸습니다. 첫 실행은
+          예산 30회 중 **17회가 거부**였고 입력 게이트 차단 21회 중 **15회가 같은
+          항목**(`Rigidbody.linearVelocity`)이었습니다 — Unity 6이 이름을 바꿨는데
+          모델의 학습 데이터가 그 이전이라 **`rb.velocity`로 계속 돌아옵니다**(스크립트
+          쓰기 24회 중 17회). 차단 메시지가 **"네가 쓴 것"을 지목**하게 하자 거부가
+          17 → 1로 떨어졌습니다. 그러자 **다른 비수렴 루프**가 드러났습니다 —
+          `policy_lint`는 `Keyboard.current == null`이라는 문자 그대로의 형태를
+          요구하는데, 모델이 쓴 것은 **`task_contract`의 교정 스니펫이 가르치는**
+          `var keyboard = Keyboard.current; if (keyboard == null) return;`이었습니다.
+          **게이트가 A를 가르치고 린트가 B를 요구하니** repair가 영원히 수렴하지
+          못하고, 위반 하나가 Play Mode 측정 11개를 전부 blocked시켰습니다. 둘을
+          고친 세 번째 실행에서 **`skipped_checks`가 11 → 0**, 요청된 검사 17개가
+          전부 측정됐습니다. 아울러 계획 강등의 네 경로가 전부 이유를 남기게 했고,
+          그 첫 수확으로 **모델이 2/2로 계획을 거부한다**는 것이 드러났습니다.
+          상세: [docs/v1.12.0_long_command_reaches_the_end.md](docs/v1.12.0_long_command_reaches_the_end.md)
