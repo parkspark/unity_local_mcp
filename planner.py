@@ -45,6 +45,29 @@ def looks_large(request: str) -> bool:
     return False
 
 
+# 검증 절차·합격 조건 블록. **검증은 호스트가 한다** — 이 절들은 빌더가 읽어야 하는
+# 것이지 계획의 재료가 아니다. 그런데 계획 호출에 그대로 실려 가면 모델이 요청 전체를
+# "하나의 선형 절차"로 읽고 `mode: "single"`로 답한다.
+#
+# 실측(플랫포머 MVP 프롬프트 2802자, temperature 0.1, 4회씩):
+#     원문 그대로     single/마일스톤1  4/4
+#     검증 섹션 제거  plan/마일스톤5~6  4/4
+# 잘라낸 길이별 시험에서도 2200자까지는 plan 3/3이고 전문에서만 single 3/3이었다 —
+# 길이가 아니라 꼬리의 내용이 원인이다.
+_VERIFICATION_SECTION = re.compile(
+    r"^\[[^\]\n]*(?:검증|합격|verif|pass condition)[^\]\n]*\][^\[]*",
+    re.I | re.M,
+)
+# 이 아래로 줄어들면 계획을 세울 재료가 남지 않는다. 그때는 원문을 그대로 쓴다.
+_MIN_PLAN_INPUT = 120
+
+
+def plan_input(request: str) -> str:
+    """계획 호출에만 쓰는 요청 본문. 빌더에게 가는 요청은 손대지 않는다."""
+    stripped = _VERIFICATION_SECTION.sub("", request).strip()
+    return stripped if len(stripped) >= _MIN_PLAN_INPUT else request
+
+
 def _prune_unrequested_level_system(plan: "Plan", request: str, on_warn) -> "Plan | None":
     """Do not let a generic MVP platformer turn into an invented level-loader project."""
     if _EXPLICIT_LEVEL_SYSTEM.search(request):
@@ -207,7 +230,7 @@ async def make_plan(
     """
     messages = [
         {"role": "system", "content": PLANNER_PROMPT},
-        {"role": "user", "content": request},
+        {"role": "user", "content": plan_input(request)},
     ]
     for attempt, temperature in enumerate((0.1, 0.0)):
         try:
@@ -229,6 +252,19 @@ async def make_plan(
             data = _extract_json(content)
         if isinstance(data, dict):
             if data.get("mode") == "single":
+                # 모델의 `mode` 라벨은 이 저장소가 가장 못 믿는 필드다 — 마일스톤을
+                # 여섯 개나 채워 놓고 `single`이라고 답한 표본이 있다. 이 지점에
+                # 왔다는 것은 호스트의 `looks_large`가 이미 큰 요청으로 판단했다는
+                # 뜻이므로, **라벨보다 내용을 본다**(planner의 설계 원칙 그대로).
+                forced = validate_plan({**data, "mode": "plan"})
+                if forced is not None:
+                    on_warn(
+                        "모델은 단일 작업이라 했지만 마일스톤 "
+                        f"{len(forced.milestones)}개를 제시해 계획으로 진행합니다."
+                    )
+                    on_reason("mode_overridden_by_content")
+                    forced.request = request
+                    return _prune_unrequested_level_system(forced, request, on_warn)
                 on_warn(
                     "모델이 이 요청을 단일 작업으로 판단했습니다 — 계획 없이 진행합니다."
                 )

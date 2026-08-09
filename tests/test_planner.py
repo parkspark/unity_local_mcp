@@ -181,3 +181,84 @@ class DegradationIsRecordedTests(unittest.IsolatedAsyncioTestCase):
         }))
         self.assertIsNotNone(plan)
         self.assertEqual(seen, [])
+
+
+class PlanInputTests(unittest.TestCase):
+    """검증은 호스트가 한다 — 그 절이 계획 호출에 실려 가면 안 된다.
+
+    실측(플랫포머 MVP 2802자, 4회씩): 원문 그대로는 `single`/마일스톤 1개가 4/4,
+    검증 섹션을 떼면 `plan`/마일스톤 5~6개가 4/4. 잘라낸 길이별 시험에서 2200자까지는
+    plan 3/3이고 전문에서만 single 3/3이었으니 길이가 아니라 꼬리의 내용이다.
+    """
+
+    def test_verification_sections_are_dropped(self):
+        request = (
+            "새 씬 Assets/Scenes/A.unity에 2.5D 플랫포머 MVP를 제작해줘.\n"
+            "[게임 구조]\n- 3D Rigidbody와 Collider를 쓰는 2.5D 횡스크롤\n"
+            "- 시작 지점, 긴 평지, 높이가 다른 플랫폼 5개 이상, 낙사 구간, 목표 지점\n"
+            "- Main Camera는 Player를 부드럽게 추종하고 씬을 반드시 저장\n"
+            "[조작]\n- A/D 좌우 이동, Space 점프, Shift 부스트\n"
+            "[Play Mode 합격 조건]\n1. 컴파일 오류 0건\n2. D를 누르면 X 증가\n"
+            "[검증 순서]\n- 씬 확인\n- Play Mode 진입\n"
+        )
+        trimmed = planner.plan_input(request)
+        self.assertIn("플랫폼 5개", trimmed)
+        self.assertNotIn("합격 조건", trimmed)
+        self.assertNotIn("검증 순서", trimmed)
+
+    def test_a_request_that_is_only_verification_is_left_alone(self):
+        """떼고 나면 계획을 세울 재료가 없다. 그때는 원문을 그대로 쓴다."""
+        request = "[검증 순서]\n- 씬 확인\n- Play Mode 진입\n"
+        self.assertEqual(planner.plan_input(request), request)
+
+    def test_a_plain_request_is_untouched(self):
+        request = "레벨 3개짜리 플랫포머를 만들어줘"
+        self.assertEqual(planner.plan_input(request), request)
+
+
+class ModeLabelIsNotTrustedTests(unittest.IsolatedAsyncioTestCase):
+    """모델이 마일스톤을 채워 놓고 `single`이라 답한 표본이 있다.
+
+    이 지점에 온 것은 호스트의 `looks_large`가 이미 큰 요청으로 판단했다는 뜻이므로
+    라벨보다 내용을 본다.
+    """
+
+    class _Client:
+        def __init__(self, content):
+            self._content = content
+
+        async def chat(self, **kwargs):
+            return type("R", (), {
+                "message": type("M", (), {"content": self._content})()
+            })()
+
+    async def _run(self, payload):
+        seen = []
+        plan = await planner.make_plan(
+            self._Client(json.dumps(payload)), "m", "플랫포머 한 스테이지를 만들어줘",
+            lambda msg: None, lambda code, detail=None: seen.append(code),
+        )
+        return plan, seen
+
+    async def test_single_with_real_milestones_becomes_a_plan(self):
+        plan, seen = await self._run({
+            "mode": "single",
+            "milestones": [
+                _milestone_dict(title="씬 만들기", deliverables=[],
+                                goal="새 씬을 만든다", verify=["scene"]),
+                _milestone_dict(title="플레이어 이동", deliverables=[],
+                                goal="이동 스크립트를 쓴다", verify=["compile"]),
+            ],
+        })
+        self.assertIsNotNone(plan)
+        self.assertEqual(len(plan.milestones), 2)
+        self.assertEqual(seen, ["mode_overridden_by_content"])
+
+    async def test_single_with_one_milestone_stays_single(self):
+        plan, seen = await self._run({
+            "mode": "single",
+            "milestones": [_milestone_dict(title="큐브 하나", deliverables=[],
+                                           goal="큐브를 만든다", verify=["scene"])],
+        })
+        self.assertIsNone(plan)
+        self.assertEqual(seen, ["model_chose_single"])

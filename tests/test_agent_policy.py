@@ -184,18 +184,25 @@ class PlanExecutionTests(unittest.TestCase):
             # 최종 보고가 히스토리에 남는다
             self.assertIn("✓", agent.history[-1]["content"])
 
-    def test_missing_deliverable_fails_retries_then_aborts(self):
+    def test_missing_deliverable_fails_retries_then_the_plan_continues(self):
+        """v1.12.1 이전에는 여기서 계획 전체를 버렸다.
+
+        기록된 plan 모드 15회에서 계획된 71개 중 39개가 시작조차 못 했고
+        11/15회가 그렇게 중단됐다. 라이브에서도 m3이 한도를 치자 m4·m5가
+        날아갔다(`20260809_132123`) — 둘 다 실패한 마일스톤에 의존하지 않았다.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             plan = _plan([
                 planner.Milestone(id="m1", title="스크립트 작성", goal="Missing.cs를 작성",
                                   deliverables=["Assets/Scripts/Missing.cs"]),
-                planner.Milestone(id="m2", title="다음 작업", goal="실행되면 안 된다"),
+                planner.Milestone(id="m2", title="다음 작업", goal="실패해도 실행된다"),
             ])
             tools = FakeTools()
             events = []
             agent = ScriptedAgent(tools, [
                 ("done", []),           # 시도 1: 파일을 만들지 않고 완료 선언
                 ("done again", []),     # 재시도: 여전히 안 만듦
+                ("m2 done", []),        # m2는 그래도 실행된다
             ], events, plan=plan)
 
             with mock.patch.object(config, "UNITY_PROJECT_DIR", tmp), \
@@ -205,10 +212,11 @@ class PlanExecutionTests(unittest.TestCase):
 
             # 재시도 프롬프트에 실패 원인이 들어간다
             self.assertTrue(any("deliverables not created" in p for p in agent.chat_prompts))
-            # m2는 실행되지 않는다 (ping은 m1 시도 2회만)
-            self.assertEqual(len([n for n, _ in tools.calls if n == "unity_ping"]), 2)
+            # m1 두 번 + m2 한 번
+            self.assertEqual(len([n for n, _ in tools.calls if n == "unity_ping"]), 3)
             self.assertIn("✗", agent.history[-1]["content"])
-            self.assertIn("· 다음 작업 (미착수)", agent.history[-1]["content"])
+            self.assertIn("✓ 다음 작업", agent.history[-1]["content"])
+            self.assertNotIn("미착수", agent.history[-1]["content"])
 
     def test_plan_budget_charges_actual_iterations_not_full_milestone_limit(self):
         plan = _plan([
@@ -241,3 +249,64 @@ class PlanExecutionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlanContinuesAfterAFailedMilestoneTests(unittest.IsolatedAsyncioTestCase):
+    """하나가 실패했다고 계획 전체를 버리면 뒤가 통째로 사라진다.
+
+    기록된 plan 모드 15회에서 계획된 71개 중 39개가 시작조차 못 했고 11/15회가
+    이렇게 중단됐다. 라이브에서도 m3이 한도를 치자 m4·m5가 날아갔는데
+    (`20260809_132123`), 그 둘은 실패한 마일스톤에 의존하지 않았다.
+    """
+
+    def _agent(self):
+        agent = Agent.__new__(Agent)
+        agent.history = []
+        agent.on_warn = lambda msg: None
+        agent.on_text = lambda msg: None
+        agent.on_milestone = lambda idx, total, title: None
+        agent._log = lambda *a, **k: None
+        return agent
+
+    async def test_the_later_milestones_still_run(self):
+        plan = planner.validate_plan({
+            "mode": "plan",
+            "milestones": [
+                {"title": "m%d" % i, "goal": "g", "deliverables": [], "verify": []}
+                for i in (1, 2, 3)
+            ],
+        })
+        agent = self._agent()
+        started = []
+
+        async def run(_plan, idx, _ledger, prev_error=None, max_iters=None):
+            started.append(idx)
+            # 가운데 마일스톤만 실패시킨다
+            if idx == 1:
+                return False, "tool-call iteration limit reached", 5
+            return True, "", 3
+
+        agent._run_milestone = run
+        ok = await agent._run_plan("요청", plan)
+
+        self.assertEqual(started.count(0), 1)
+        self.assertIn(2, started, "실패 뒤의 마일스톤이 실행되어야 한다")
+        self.assertFalse(ok, "실패가 있으면 계획 전체는 성공이 아니다")
+
+    async def test_an_exhausted_budget_still_stops(self):
+        plan = planner.validate_plan({
+            "mode": "plan",
+            "milestones": [
+                {"title": "m%d" % i, "goal": "g", "deliverables": [], "verify": []}
+                for i in (1, 2, 3)
+            ],
+        })
+        agent = self._agent()
+        started = []
+
+        async def run(_plan, idx, _ledger, prev_error=None, max_iters=None):
+            started.append(idx)
+            return False, "tool-call iteration limit reached", config.PLAN_MAX_TOTAL_ITERS
+        agent._run_milestone = run
+        await agent._run_plan("요청", plan)
+        self.assertEqual(started, [0], "예산이 바닥나면 멈춘다")

@@ -627,8 +627,10 @@ class Agent:
     async def _make_plan(self, user_text: str):
         """플래닝 호출 래퍼 (테스트에서 오버라이드 지점)."""
         def remember(code: str, detail: str | None = None) -> None:
-            self._planner_degraded = code if not detail else f"{code}:{detail}"
-            self._log("planner_degraded", reason=code, detail=detail)
+            # 강등만이 아니라 "라벨을 무시하고 계획으로 갔다"도 남긴다.
+            if code != "mode_overridden_by_content":
+                self._planner_degraded = code if not detail else f"{code}:{detail}"
+            self._log("planner_decision", reason=code, detail=detail)
 
         return await planner.make_plan(
             self.client, self.model, user_text, self.on_warn, remember
@@ -1663,6 +1665,7 @@ class Agent:
         self.history.append({"role": "user", "content": user_text})
         ledger = planner.ArtifactLedger()
         budget = config.PLAN_MAX_TOTAL_ITERS
+        failed_titles: list[str] = []
         for idx, m in enumerate(plan.milestones):
             if budget <= 0:
                 ledger.milestone_done(m.title, False, "plan iteration budget exhausted")
@@ -1691,10 +1694,30 @@ class Agent:
                 remaining_plan_iterations=budget,
             )
             if not ok:
-                self.on_warn(f"마일스톤 '{m.title}' 최종 실패 — 계획을 중단합니다.")
-                break
-        # 순차 실행이 중단된 경우 사용자에게 후속 단계가 단순 누락된 것이 아니라
-        # 의도적으로 미착수 상태임을 명확히 보여 준다.
+                # 하나가 실패했다고 계획 전체를 버리면 **뒤의 마일스톤이 통째로
+                # 사라진다.** 기록된 plan 모드 15회에서 계획된 71개 중 39개가
+                # 시작조차 못 했고, 11/15회가 이렇게 중단됐다. 라이브에서도 m3이
+                # 한도를 치자 m4·m5가 날아갔다(`20260809_132123`) — 그 둘은 실패한
+                # 마일스톤에 의존하지도 않았다(카메라 스크립트, 씬 설정).
+                #
+                # 남은 마일스톤은 계속 시도한다. 무엇이 실패했는지는 대장이 남기고,
+                # 예산이 바닥나면 그때 멈춘다.
+                failed_titles.append(m.title)
+                self.on_warn(
+                    f"마일스톤 '{m.title}' 최종 실패 — 다음 마일스톤을 계속합니다."
+                )
+        # 예산이 바닥나 못 들어간 마일스톤은 사용자에게 단순 누락이 아니라
+        # 미착수임을 명확히 보여 준다. 계수는 **대장에 미착수를 넣기 전에** 센다 —
+        # `milestone_pending`도 같은 목록에 쌓이므로 나중에 세면 늘 0이 된다.
+        unstarted = len(plan.milestones) - len(ledger.done)
+        self._log(
+            "plan_finished",
+            milestones=len(plan.milestones),
+            completed=sum(1 for _t, ok, _n in ledger.done if ok),
+            failed=failed_titles,
+            unstarted=unstarted,
+            remaining_plan_iterations=budget,
+        )
         for pending in plan.milestones[len(ledger.done):]:
             ledger.milestone_pending(pending.title)
         report = ledger.report()

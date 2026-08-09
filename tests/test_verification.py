@@ -2649,3 +2649,46 @@ class HostOrchestrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IdleVelocityRuleTests(unittest.TestCase):
+    """규칙이 철자가 아니라 동작을 봐야 한다.
+
+    실측 `20260809_132831`에서 모델이 **"to satisfy policy check"라는 주석까지 달아
+    가며** 지역 벡터를 거쳐 수평 속도를 0으로 만들었는데도 규칙이 거부했고,
+    repair 4사이클이 같은 위반을 반복하며 Play Mode 측정 11개가 전부 blocked됐다.
+    """
+
+    TRIGGER = "if (moveX != 0) { }"
+
+    def _violations(self, body):
+        with tempfile.TemporaryDirectory() as project:
+            os.makedirs(os.path.join(project, "Assets", "Scripts"))
+            path = "Assets/Scripts/PlayerMovement25D.cs"
+            with open(os.path.join(project, path), "w", encoding="utf-8") as handle:
+                handle.write(
+                    "using UnityEngine; public class PlayerMovement25D : MonoBehaviour {"
+                    "Rigidbody rb; void Move() { " + self.TRIGGER + body + " } }"
+                )
+            return lint_scripts("무입력 0.5초", [path], project), path
+
+    def test_the_shapes_that_actually_zero_the_axis_pass(self):
+        shapes = {
+            "지역 벡터 경유": (
+                "Vector3 velocity = rb.linearVelocity; velocity.x = 0f; "
+                "rb.linearVelocity = velocity;"
+            ),
+            "직접 생성": "rb.linearVelocity = new Vector3(0f, rb.linearVelocity.y, 0f);",
+            "Vector3.zero": "rb.linearVelocity = Vector3.zero;",
+        }
+        for label, body in shapes.items():
+            with self.subTest(label):
+                violations, path = self._violations(body)
+                self.assertNotIn(f"idle_velocity_not_zeroed:{path}", violations)
+
+    def test_never_zeroing_the_axis_still_fails(self):
+        violations, path = self._violations(
+            "Vector3 velocity = rb.linearVelocity; velocity.x = moveX * 5f; "
+            "rb.linearVelocity = velocity;"
+        )
+        self.assertIn(f"idle_velocity_not_zeroed:{path}", violations)

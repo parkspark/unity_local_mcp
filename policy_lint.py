@@ -71,6 +71,34 @@ def _keyboard_null_checked(code: str) -> bool:
     return False
 
 
+_VELOCITY_WRITEBACK = re.compile(r"\.\s*linearVelocity\s*=\s*(\w+)\s*;")
+
+
+def _zeroes_horizontal_when_idle(code: str) -> bool:
+    """입력이 없을 때 수평 속도를 0으로 만드는가.
+
+    **철자가 아니라 동작을 본다.** 예전 규칙은 `.linearVelocity = new Vector3(0, ...)`
+    한 형태만 인정했는데, 모델은 지역 벡터를 거쳐 쓰는 쪽을 택한다.
+
+        Vector3 velocity = rb.linearVelocity;
+        if (moveX == 0) { velocity.x = 0f; }
+        rb.linearVelocity = velocity;
+
+    실측 `20260809_132831`에서 모델이 **"to satisfy policy check"라는 주석까지 달아
+    가며** 이 코드를 썼는데도 규칙이 거부했고, repair 4사이클이 같은 위반을 반복하며
+    Play Mode 측정 11개를 전부 blocked시켰다.
+    """
+    if re.search(r"\.\s*linearVelocity\s*=\s*new\s+Vector3\s*\(\s*0(?:f)?\s*,", code):
+        return True
+    if re.search(r"\.\s*linearVelocity\s*=\s*Vector3\s*\.\s*zero", code):
+        return True
+    # 지역 벡터의 x를 0으로 만든 뒤 되써 넣는 형태
+    for name in set(_VELOCITY_WRITEBACK.findall(code)):
+        if re.search(rf"\b{re.escape(name)}\s*\.\s*x\s*=\s*0(?:\.0)?f?\s*;", code):
+            return True
+    return False
+
+
 def lint_scripts(request: str, asset_paths: list[str], project_dir: str) -> list[str]:
     lower = request.lower()
     violations: list[str] = []
@@ -111,13 +139,9 @@ def lint_scripts(request: str, asset_paths: list[str], project_dir: str) -> list
             ):
                 violations.append(f"fall_respawn_check_missing:{relative}")
         if "무입력 0.5초" in lower and "PlayerMovement" in filename:
-            writes_zero_horizontal_velocity = re.search(
-                r"\.linearVelocity\s*=\s*new\s+Vector3\s*\(\s*0(?:f)?\s*,",
-                code,
-            )
             if (
                 re.search(r"if\s*\(\s*moveX\s*!=\s*0", code)
-                and not writes_zero_horizontal_velocity
+                and not _zeroes_horizontal_when_idle(code)
             ):
                 violations.append(f"idle_velocity_not_zeroed:{relative}")
         if "SideScrollerCamera" in filename:
