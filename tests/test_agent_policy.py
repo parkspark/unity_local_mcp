@@ -310,3 +310,83 @@ class PlanContinuesAfterAFailedMilestoneTests(unittest.IsolatedAsyncioTestCase):
         agent._run_milestone = run
         await agent._run_plan("요청", plan)
         self.assertEqual(started, [0], "예산이 바닥나면 멈춘다")
+
+
+class RetryKnowsWhatAlreadyExistsTests(unittest.TestCase):
+    """재시도는 히스토리를 새로 시작한다 — 이미 만든 파일을 모르면 또 만든다.
+
+    라이브 3회 모두 남은 예산 0으로 끝났다(`20260809_132123`·`132831`·`133614`).
+    무엇이 있고 무엇이 없는지는 호스트가 디스크에서 결정적으로 안다.
+    """
+
+    def _plan(self):
+        return _plan([
+            planner.Milestone(id="m1", title="스크립트", goal="둘을 만든다",
+                              deliverables=["Assets/Scripts/A.cs", "Assets/Scripts/B.cs"]),
+        ])
+
+    def test_the_first_attempt_lists_everything(self):
+        prompt = _milestone_prompt(self._plan(), 0, planner.ArtifactLedger())
+        self.assertIn("이 마일스톤이 만들어야 하는 파일", prompt)
+        self.assertNotIn("이미 만들어져 있는 파일", prompt)
+
+    def test_a_retry_separates_what_exists_from_what_is_missing(self):
+        prompt = _milestone_prompt(
+            self._plan(), 0, planner.ArtifactLedger(), prev_error="한도 소진",
+            missing=["Assets/Scripts/B.cs"],
+        )
+        self.assertIn("이미 만들어져 있는 파일", prompt)
+        self.assertIn("Assets/Scripts/A.cs", prompt.split("이미 만들어져 있는 파일")[1])
+        self.assertIn("아직 없는 파일", prompt)
+
+    def test_a_retry_with_everything_present_says_so(self):
+        prompt = _milestone_prompt(
+            self._plan(), 0, planner.ArtifactLedger(), prev_error="한도 소진",
+            missing=[],
+        )
+        self.assertIn("파일은 모두 있다", prompt)
+        self.assertNotIn("아직 없는 파일", prompt)
+
+
+class LimitWithCompleteDeliverablesTests(unittest.IsolatedAsyncioTestCase):
+    """한도를 쳤는데 만들어야 할 파일이 전부 있으면 재시도는 낭비다.
+
+    재생 근거: 한도를 친 마일스톤 10건 중 산출물이 전부 있던 것은 1건. 드물게
+    발동하고, 발동하면 재시도 한 번(12 이터레이션)을 아낀다.
+    """
+
+    async def _limit_case(self, deliverables, created):
+        with tempfile.TemporaryDirectory() as tmp:
+            for rel in created:
+                path = os.path.join(tmp, rel)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                open(path, "w", encoding="utf-8").close()
+            plan = _plan([planner.Milestone(id="m1", title="t", goal="g",
+                                            deliverables=deliverables)])
+            agent = Agent.__new__(Agent)
+            agent._log = lambda *a, **k: None
+            agent.known_session_scripts = set()
+            agent.tools = types.SimpleNamespace(
+                call=lambda name, args: asyncio.sleep(0, result="{}")
+            )
+
+            async def loop(*a, **k):
+                return False, "tool-call iteration limit reached", 12
+            agent._react_loop = loop
+            with mock.patch.object(config, "UNITY_PROJECT_DIR", tmp):
+                return await agent._run_milestone(plan, 0, planner.ArtifactLedger())
+
+    async def test_all_present_counts_as_done(self):
+        ok, note, _used = await self._limit_case(
+            ["Assets/Scripts/A.cs"], ["Assets/Scripts/A.cs"])
+        self.assertTrue(ok)
+        self.assertEqual(note, "")
+
+    async def test_a_missing_file_still_fails(self):
+        ok, note, _used = await self._limit_case(["Assets/Scripts/A.cs"], [])
+        self.assertFalse(ok)
+        self.assertIn("iteration limit", note)
+
+    async def test_a_milestone_without_deliverables_is_not_auto_passed(self):
+        ok, _note, _used = await self._limit_case([], [])
+        self.assertFalse(ok)

@@ -180,7 +180,7 @@ def _retryable_model_error(error: BaseException) -> bool:
 
 
 def _milestone_prompt(plan: "planner.Plan", idx: int, ledger: "planner.ArtifactLedger",
-                      prev_error: str = "") -> str:
+                      prev_error: str = "", missing: list[str] | None = None) -> str:
     """마일스톤 실행 프롬프트. 전부 호스트가 결정적으로 합성한다(모델 요약 없음)."""
     done_status = {title: ok for title, ok, _ in ledger.done}
     plan_lines = []
@@ -207,7 +207,25 @@ def _milestone_prompt(plan: "planner.Plan", idx: int, ledger: "planner.ArtifactL
         )
     parts.append(f"[현재 마일스톤 {m.id}] {m.goal}")
     if m.deliverables:
-        parts.append("이 마일스톤이 만들어야 하는 파일: " + ", ".join(m.deliverables))
+        # 재시도는 히스토리를 새로 시작한다. 이미 만든 파일을 모른 채 돌면 같은 것을
+        # 다시 만들며 예산을 태운다 — 라이브 3회 모두 남은 예산 0으로 끝났다.
+        # 무엇이 이미 있고 무엇이 없는지는 호스트가 디스크에서 결정적으로 안다.
+        if missing is None:
+            parts.append("이 마일스톤이 만들어야 하는 파일: " + ", ".join(m.deliverables))
+        else:
+            present = [d for d in m.deliverables if d not in missing]
+            if present:
+                parts.append(
+                    "이미 만들어져 있는 파일(다시 만들지 마라, 필요하면 읽어서 고쳐라): "
+                    + ", ".join(present)
+                )
+            if missing:
+                parts.append("아직 없는 파일 — 이것부터 만들어라: " + ", ".join(missing))
+            else:
+                parts.append(
+                    "이 마일스톤의 파일은 모두 있다. 남은 것은 씬 배치·컴포넌트 부착·"
+                    "검증이다. 파일을 다시 쓰지 마라."
+                )
     parts.append(
         "이 마일스톤만 수행하라. 이후 마일스톤의 작업은 하지 마라. "
         "이후 마일스톤에서 만들 스크립트나 컴포넌트를 미리 생성·부착하지 마라. "
@@ -1648,16 +1666,31 @@ class Agent:
         contract = TaskContract.for_milestone(m, self.known_session_scripts)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": _milestone_prompt(plan, idx, ledger, prev_error)},
+            {"role": "user", "content": _milestone_prompt(
+                plan, idx, ledger, prev_error,
+                # 첫 시도에는 진척이 없다. 재시도에만 디스크 상태를 실어 준다.
+                self._deliverables_missing(m) if prev_error else None,
+            )},
         ]
         # 마일스톤 경계에서 도메인 리로드/포트 호핑을 흡수 (실패해도 call()의 재시도가 처리)
         ping_result = await self.tools.call("unity_ping", {})
         self._log("milestone_ping", milestone_id=m.id, result=ping_result)
         ok, note, used = await self._react_loop(messages, contract, max_iters or m.max_iters, ledger)
+        missing_files = self._deliverables_missing(m)
         if ok:
-            missing_files = self._deliverables_missing(m)
             if missing_files:
                 return False, "deliverables not created: " + ", ".join(missing_files), used
+        elif m.deliverables and not missing_files:
+            # 한도를 쳤는데 이 마일스톤이 만들어야 할 파일이 전부 있다. 재시도는
+            # 같은 것을 다시 만들며 12회를 더 태울 뿐이다.
+            #
+            # 재생 근거: 한도를 친 마일스톤 10건 중 산출물이 전부 있던 것은 1건이다.
+            # 드물게 발동하고, 발동할 때는 재시도 한 번(12 이터레이션)을 아낀다.
+            self._log(
+                "milestone_deliverables_complete_despite_limit",
+                id=m.id, title=m.title, note=note,
+            )
+            return True, "", used
         return ok, note, used
 
     async def _run_plan(self, user_text: str, plan) -> bool:
