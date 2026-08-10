@@ -815,3 +815,17 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           규칙이 재생 예측(10건 중 1건)보다 자주 발동한 것(5건 중 2건)은 되돌릴 수
           있는 결정으로 STATUS E5에 남겼습니다.
           상세: [docs/v1.12.2_retry_knows_what_exists.md](docs/v1.12.2_retry_knows_what_exists.md)
+
+- ver 1.12.3 - **씬을 고쳐도 스크립트가 지우고 있었습니다.** 계획은 완주하는데 판정이
+          `failed`로 남았고, 막던 것 하나가 `rigidbody_constraints_incomplete:112`
+          였습니다 — **이미 검사가 있는 항목인데 repair가 못 고칩니다.** 씬 파일은
+          `m_Constraints = 120`으로 올바른데 측정값이 112였습니다. 스크립트가
+          `Awake`에서 `rb.constraints = FreezeRotationX | Y | Z`(=112)를 대입해
+          **씬의 FreezePositionZ를 런타임에 지우고** 있었습니다. repair가 씬을
+          고치면 스크립트가 매번 되돌립니다. 기록에서 스크립트가 `rb.constraints`를
+          대입한 실행은 12건이고 대부분 씬도 함께 설정합니다 — 런타임에는 늘
+          스크립트가 이깁니다. 교정 안내가 **두 표면을 모두 지목**하게 하자 라이브에서
+          **한 사이클 만에 해소**됐습니다(이전에는 사이클을 넘겨 남았습니다). 이것은
+          v1.12.0~1이 다룬 것과 같은 뿌리의 다른 얼굴입니다 — 앞의 셋은 규칙이 철자를
+          검사해서, 이번엔 어디를 고칠지 안 알려 줘서 못 고쳤습니다.
+          상세: [docs/v1.12.3_constraints_two_surfaces.md](docs/v1.12.3_constraints_two_surfaces.md)

@@ -2083,7 +2083,12 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
                 "- rigidbody_constraints_incomplete: Player Rigidbody.constraints를 "
                 "FreezePositionZ | FreezeRotationX | FreezeRotationY | "
                 "FreezeRotationZ로 설정한다(정수 비트값 120). 기존 필수 비트를 "
-                "단일 값으로 덮어쓰지 않는다."
+                "단일 값으로 덮어쓰지 않는다.\n"
+                "  **씬 값만 고치면 소용없을 수 있다.** 스크립트가 Awake/Start에서 "
+                "`rb.constraints = ...`로 대입하면 런타임에 그것이 이긴다 — 씬이 120인데 "
+                "측정값이 112로 나오는 것이 그 경우다(스크립트가 회전 3축만 잠갔다). "
+                "스크립트에 그 대입이 있으면 거기에 FreezePositionZ를 포함시키거나, "
+                "대입 줄을 지우고 씬 값을 쓰게 한다. 한쪽만 고치고 끝내지 마라."
             )
         if failure == "scene_has_no_created_objects":
             lint_guidance.append(

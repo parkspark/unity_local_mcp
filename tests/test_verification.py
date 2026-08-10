@@ -2737,3 +2737,23 @@ class FallRespawnRuleTests(unittest.TestCase):
         body = "void Update() { }"
         violations, path = self._violations(body)
         self.assertIn(f"fall_respawn_check_missing:{path}", violations)
+
+
+class ConstraintsRemedyTests(unittest.TestCase):
+    """씬을 고쳐도 스크립트가 런타임에 덮어쓰면 수렴하지 않는다.
+
+    실측 `20260810_093513`: 씬은 `m_Constraints = 120`인데 측정값은 112였다.
+    스크립트가 `rb.constraints = FreezeRotationX | Y | Z`(=112)를 대입해 씬의
+    FreezePositionZ를 지웠다. 기록에서 스크립트가 `rb.constraints`를 대입한 실행은
+    12건이고 대부분 씬도 함께 설정한다 — 런타임에는 스크립트가 이긴다.
+    """
+
+    def test_the_remedy_names_the_script_override(self):
+        spec = VerificationSpec.from_request(
+            "Player의 Z 이동과 회전을 고정하고 A/D 이동을 구현해줘"
+        )
+        prompt = fix_prompt(spec, ["rigidbody_constraints_incomplete:112"], {})
+        self.assertIn("120", prompt)
+        self.assertIn("rb.constraints", prompt)
+        self.assertIn("런타임에 그것이 이긴다", prompt)
+        self.assertIn("한쪽만 고치고 끝내지 마라", prompt)
