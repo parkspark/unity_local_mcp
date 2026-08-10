@@ -878,8 +878,17 @@ class Agent:
                         contract.block("boost", "stable_spawn_not_observed")
                         contract.block("camera", "stable_spawn_not_observed")
                     elif contract.idle_after[1] < contract.idle_before[1] - 2:
+                        # 떨어졌다는 것만 말하면 모델은 어디를 봐야 할지 모른다.
+                        # 실측 `20260810_095045`의 씬에는 Player·Main Camera·
+                        # Directional Light뿐이었다 — **밟을 것이 아예 없었다.**
+                        # 그 경우를 구분해 이름으로 지목한다.
+                        reason = (
+                            "player_fell_during_spawn_check"
+                            if contract.standable_objects()
+                            else "player_fell_no_ground_in_scene"
+                        )
                         for stage in ("movement", "jump", "boost", "camera"):
-                            contract.block(stage, "player_fell_during_spawn_check")
+                            contract.block(stage, reason)
                 async def sample_objects(store: dict) -> None:
                     """비-Player 오브젝트의 위치·활성 상태를 한 번 훑는다.
 

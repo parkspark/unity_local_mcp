@@ -1056,6 +1056,33 @@ class VerificationContract:
             and str(node.get("name", "")).strip().lower() not in _DEFAULT_SCENE_OBJECTS
         ]
 
+    def standable_objects(self) -> list[str]:
+        """플레이어가 밟을 수 있는 것 — 콜라이더를 가진 비-Player 생성 오브젝트.
+
+        떨어졌다는 사실만으로는 어디를 고쳐야 하는지 알 수 없다. 바닥이 있는데
+        플레이어가 그 옆에서 시작한 것과, **밟을 것이 아예 없는 것**은 다른 결함이다.
+        실측 `20260810_095045`의 씬에는 `Player`·`Main Camera`·`Directional Light`
+        뿐이었다.
+
+        런타임에 바닥을 만드는 씬은 계층에 안 잡힌다(STATUS C). 그래서 이 값은
+        **판정이 아니라 이유를 가르는 데만** 쓴다 — 없다고 해서 새로 실패시키지 않고,
+        이미 난 낙하 실패의 이름을 바꿀 뿐이다.
+        """
+        standable = []
+        for name in self.created_objects():
+            if name.strip().lower() == "player":
+                continue
+            node = self._find_node(name)
+            components = (node or {}).get("components")
+            if not isinstance(components, list):
+                continue
+            if any(
+                str(item).lower().split(".")[-1].endswith("collider")
+                for item in components
+            ):
+                standable.append(name)
+        return standable
+
     def autonomous_candidates(self, limit: int = 6) -> list[str]:
         """Objects that could be the thing moving on its own.
 
@@ -2089,6 +2116,24 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
                 "측정값이 112로 나오는 것이 그 경우다(스크립트가 회전 3축만 잠갔다). "
                 "스크립트에 그 대입이 있으면 거기에 FreezePositionZ를 포함시키거나, "
                 "대입 줄을 지우고 씬 값을 쓰게 한다. 한쪽만 고치고 끝내지 마라."
+            )
+        if "player_fell_no_ground_in_scene" in failure:
+            lint_guidance.append(
+                "- player_fell_no_ground_in_scene: Play Mode에 들어가자마자 Player가 "
+                "떨어졌고, **씬에 밟을 것이 하나도 없다** — 콜라이더를 가진 비-Player "
+                "오브젝트가 없다. 스크립트가 아니라 씬이 문제다. "
+                "unity_create_gameobject로 바닥을 만들고(primitive=\"Cube\", 예: "
+                "position [0, -0.5, 0], scale [20, 1, 4]) Player가 그 위에 오도록 한 뒤 "
+                "unity_save_scene까지 한다. 검증은 시작 지점에서 좌우로 이동하므로 "
+                "시작점 좌우 8유닛은 평평하게 이어져야 한다."
+            )
+        if "player_fell_during_spawn_check" in failure:
+            lint_guidance.append(
+                "- player_fell_during_spawn_check: Play Mode에 들어가자마자 Player가 "
+                "떨어졌다. 씬에 콜라이더를 가진 오브젝트는 있으므로 **배치가 어긋난 "
+                "것**이다. unity_get_gameobject로 Player와 바닥의 좌표·크기를 읽어 "
+                "Player가 바닥 위(X/Z 범위 안, Y는 바닥 윗면보다 위)에 오도록 옮긴다. "
+                "바닥에 Collider가 실제로 붙어 있는지도 확인한다."
             )
         if failure == "scene_has_no_created_objects":
             lint_guidance.append(

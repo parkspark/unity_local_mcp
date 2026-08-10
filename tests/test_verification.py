@@ -2757,3 +2757,50 @@ class ConstraintsRemedyTests(unittest.TestCase):
         self.assertIn("rb.constraints", prompt)
         self.assertIn("런타임에 그것이 이긴다", prompt)
         self.assertIn("한쪽만 고치고 끝내지 마라", prompt)
+
+
+class SpawnFallReasonTests(unittest.TestCase):
+    """떨어졌다는 사실만으로는 어디를 고칠지 모른다.
+
+    실측 `20260810_095045`의 씬에는 `Player`·`Main Camera`·`Directional Light`
+    뿐이었다 — 밟을 것이 아예 없었다. 바닥이 있는데 배치가 어긋난 것과는 다른
+    결함이므로 이름을 가른다.
+    """
+
+    def _contract(self, *roots):
+        spec = VerificationSpec.from_request(
+            "Assets/Scenes/C.unity 경로에 새 씬을 생성하고 Player와 바닥을 만들어 "
+            "A/D 이동을 구현해줘"
+        )
+        contract = VerificationContract(spec=spec, project_dir="")
+        contract.observe("unity_get_hierarchy", {}, hierarchy(*DEFAULTS, *roots))
+        return contract
+
+    def test_a_scene_with_only_a_player_has_nothing_to_stand_on(self):
+        contract = self._contract(
+            obj("Player", "Transform", "MeshRenderer", "Rigidbody", "CapsuleCollider"))
+        self.assertEqual(contract.standable_objects(), [])
+
+    def test_a_floor_with_a_collider_counts(self):
+        contract = self._contract(
+            obj("Player", "Transform", "Rigidbody", "CapsuleCollider"),
+            obj("Ground", "Transform", "MeshRenderer", "BoxCollider"))
+        self.assertEqual(contract.standable_objects(), ["Ground"])
+
+    def test_a_floor_without_a_collider_does_not_count(self):
+        """메시만 있는 바닥은 통과할 수 없다 — 물리적으로 밟을 수 없다."""
+        contract = self._contract(
+            obj("Player", "Transform", "Rigidbody", "CapsuleCollider"),
+            obj("Ground", "Transform", "MeshFilter", "MeshRenderer"))
+        self.assertEqual(contract.standable_objects(), [])
+
+    def test_each_reason_gets_its_own_remedy(self):
+        spec = VerificationSpec.from_request(
+            "새 씬에 Player와 바닥을 만들어 A/D 이동을 구현해줘")
+        empty = fix_prompt(spec, ["blocked:movement:player_fell_no_ground_in_scene"], {})
+        self.assertIn("밟을 것이 하나도 없다", empty)
+        self.assertIn("unity_create_gameobject", empty)
+        misplaced = fix_prompt(
+            spec, ["blocked:movement:player_fell_during_spawn_check"], {})
+        self.assertIn("배치가 어긋난", misplaced)
+        self.assertNotIn("밟을 것이 하나도 없다", misplaced)

@@ -829,3 +829,19 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           v1.12.0~1이 다룬 것과 같은 뿌리의 다른 얼굴입니다 — 앞의 셋은 규칙이 철자를
           검사해서, 이번엔 어디를 고칠지 안 알려 줘서 못 고쳤습니다.
           상세: [docs/v1.12.3_constraints_two_surfaces.md](docs/v1.12.3_constraints_two_surfaces.md)
+
+- ver 1.12.4 - **밟을 것이 없다는 것을 이름으로 말하니 통과했습니다.** 긴 명령을 막던
+          마지막 하나가 `player_fell_during_spawn_check`였는데, 실패한 씬을 열어 보니
+          **바닥이 아예 없었습니다** — Player·Main Camera·Directional Light뿐. 호스트는
+          "떨어졌다"까지만 말해서 모델은 스크립트를 고칠지 씬을 고칠지 알 수 없었고,
+          이 실패가 난 3건은 전부 2사이클 이상 남아 있었습니다. **새 게이트는 세우지
+          않았습니다** — "바닥이 없으면 실패"를 정적으로 막으면 런타임에 바닥을 만드는
+          씬을 오탐합니다. 대신 실제로 떨어졌을 때 **이유를 가릅니다**:
+          `player_fell_no_ground_in_scene`(콜라이더 가진 오브젝트가 0개)과
+          `player_fell_during_spawn_check`(배치 어긋남). 각각 다른 교정 안내를 주고,
+          바닥이 없을 때는 **"스크립트가 아니라 씬이 문제다"**와 만들 형태까지
+          말합니다. 결과: repair가 씬을 고쳤고 **플랫포머 한 스테이지 요청이 처음으로
+          `verified`**로 끝났습니다 — 계획 5/5 완료, **측정 17개·미측정 0**.
+          다만 1회이고 `build_stage_success`는 여전히 `False`이며, 플랫폼 개수를 세는
+          검사가 없어 `unmapped_requirements` 2건이 남습니다.
+          상세: [docs/v1.12.4_no_ground_named.md](docs/v1.12.4_no_ground_named.md)
