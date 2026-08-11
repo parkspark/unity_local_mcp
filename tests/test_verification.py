@@ -1903,6 +1903,133 @@ class BlockedMovementPathTests(unittest.TestCase):
         )
 
 
+class CandidatesLeaveRoomForTheMoversTests(unittest.TestCase):
+    """큰 레벨에서 후보 자리를 구조물이 다 차지했다.
+
+    마리오 1-1 실측(`20260811_100555`) — 오브젝트 19개 중 앞 6개가 `Ground1..Pipe3`
+    였고 움직이는 것은 19번째 `Goomba`뿐이었다. 호스트는 굼바를 **한 번도 재지 않고**
+    `no_object_moved_on_its_own`을 냈다(`autonomous_motion`의 대상이 `Ground1`,
+    거리 0.0으로 기록돼 있다). 코인 소멸도 같은 이유로 측정 밖이었다.
+
+    구조물과 상호작용 대상을 가르는 신호는 이미 있다 — 붙은 사용자 스크립트.
+    """
+
+    LEVEL = [
+        "Ground1", "Ground2", "Ground3", "Pipe1", "Pipe2", "Pipe3",
+        "BrickRow1", "Step1", "Flagpole", "Coin1", "Coin2", "Coin3", "Goomba",
+    ]
+    SCRIPTED = {"Coin1": "CoinPickup", "Coin2": "CoinPickup",
+                "Coin3": "CoinPickup", "Goomba": "GoombaPatrol"}
+
+    def _contract(self):
+        spec = VerificationSpec.from_request(
+            "Assets/Scenes/M.unity 경로에 새 씬을 생성하고 Player와 바닥을 만들어 "
+            "A/D 이동을 구현하고, 적이 스스로 순찰하게 해줘"
+        )
+        contract = VerificationContract(spec=spec, project_dir="")
+        contract.hierarchy_seen = True
+        contract.scene_roots = [
+            {
+                "name": name,
+                "components": (
+                    ["UnityEngine.Transform", "UnityEngine.BoxCollider"]
+                    + ([self.SCRIPTED[name]] if name in self.SCRIPTED else [])
+                ),
+            }
+            for name in ["Player"] + self.LEVEL
+        ]
+        return contract
+
+    def test_the_mover_is_no_longer_cut_off(self):
+        candidates = self._contract().autonomous_candidates()
+        self.assertIn("Goomba", candidates)
+        self.assertLessEqual(len(candidates), 6)
+
+    def test_the_interaction_targets_come_before_the_structures(self):
+        candidates = self._contract().autonomous_candidates()
+        self.assertEqual(set(candidates[:4]), {"Coin1", "Coin2", "Coin3", "Goomba"})
+
+    def test_a_script_attached_after_the_hierarchy_read_still_counts(self):
+        """계층 스냅샷이 스크립트 부착보다 먼저 찍히면 그 오브젝트가 구조물로 보인다.
+
+        실측(`20260811_101230`): `GoombaPatrol`이 실제로 붙어 있는데도 굼바가 후보에서
+        잘렸다. 직접 조회 기록이 있으면 그쪽이 최신이다.
+        """
+        contract = self._contract()
+        for node in contract.scene_roots:
+            if node["name"] == "Goomba":
+                node["components"] = ["UnityEngine.Transform", "UnityEngine.Rigidbody"]
+        contract.observed_components["Goomba"] = [
+            "UnityEngine.Transform", "UnityEngine.Rigidbody", "GoombaPatrol",
+        ]
+        self.assertIn("Goomba", contract.autonomous_candidates())
+
+    def test_structures_still_fill_the_remaining_room(self):
+        """스크립트가 하나도 없으면 예전 순서 그대로다 — 움직이는 발판을 잃지 않는다."""
+        contract = self._contract()
+        for node in contract.scene_roots:
+            node["components"] = ["UnityEngine.Transform"]
+        self.assertEqual(contract.autonomous_candidates(), self.LEVEL[:6])
+
+
+class PlayerScriptNamedByTheRequestTests(unittest.TestCase):
+    """대상에 붙일 스크립트를 철자가 아니라 **요청이 지목한 자리**에서 고른다.
+
+    기존 규칙은 파일명에 `player`와 `movement`가 **둘 다** 있어야 Player의 필수
+    구성으로 인정했다. 마리오 1-1 요청의 `MarioMovement.cs`는 `[Player 필수 구성]`에
+    분명히 적혀 있는데 그 조건에 걸려 요구 목록에서 빠졌고, 스크립트가 아예 안 붙은
+    씬에서 호스트는 `player_did_not_move_right`만 말했다 — 이동 코드가 없다는 사실을
+    알고 있으면서. repair 세 사이클이 같은 자리를 맴돌았다(`20260811_095736`).
+    """
+
+    def _request(self, class_name):
+        return (
+            "Assets/Scenes/M.unity 경로에 새 씬을 생성하고 2.5D 플랫포머를 만들어줘.\n"
+            "\n"
+            "[스크립트 산출물]\n"
+            f"- Assets/Scripts/{class_name}.cs\n"
+            "- Assets/Scripts/SideScrollerCamera.cs\n"
+            "- Assets/Scripts/CoinPickup.cs\n"
+            "\n"
+            "[Player 필수 구성]\n"
+            "- 이름: Player\n"
+            "- Rigidbody\n"
+            "- Collider\n"
+            f"- {class_name}\n"
+            "- A/D 좌우 이동과 Space 점프\n"
+            "\n"
+            "[카메라 필수 구성]\n"
+            "- 이름: Main Camera\n"
+            "- SideScrollerCamera\n"
+        )
+
+    def test_a_script_the_old_name_rule_missed(self):
+        spec = VerificationSpec.from_request(self._request("MarioMovement"))
+        self.assertIn("MarioMovement", spec.required_components["Player"])
+
+    def test_the_conventional_name_still_works(self):
+        spec = VerificationSpec.from_request(self._request("PlayerMovement25D"))
+        self.assertIn("PlayerMovement25D", spec.required_components["Player"])
+
+    def test_other_scripts_in_the_request_are_not_attached_to_the_player(self):
+        """같은 요청의 코인·카메라 스크립트가 Player 필수 구성으로 새면 오탐이다."""
+        required = VerificationSpec.from_request(
+            self._request("MarioMovement")
+        ).required_components["Player"]
+        self.assertNotIn("CoinPickup", required)
+        self.assertNotIn("SideScrollerCamera", required)
+
+    def test_the_missing_script_now_reaches_the_failure_list(self):
+        spec = VerificationSpec.from_request(self._request("MarioMovement"))
+        contract = VerificationContract(spec=spec, project_dir="")
+        contract.observed_components["Player"] = [
+            "UnityEngine.Transform", "UnityEngine.CapsuleCollider", "UnityEngine.Rigidbody",
+        ]
+        self.assertIn(
+            "component_missing:Player:MarioMovement", contract.failures()
+        )
+
+
 class BoostThresholdFollowsTheRequestTests(unittest.TestCase):
     """문턱 1.4 고정은 요청의 파라미터와 어긋나 있었다.
 
@@ -1964,6 +2091,21 @@ class BoostThresholdFollowsTheRequestTests(unittest.TestCase):
         ):
             with self.subTest(ratio=ratio):
                 self.assertEqual(ratio >= spec.boost_min_ratio(), expected_pass)
+
+    def test_the_same_feature_called_dash_is_read_too(self):
+        """`대시`만 쓴 요청에서 지속시간을 못 읽으면 문턱이 다시 도달 불가능해진다.
+
+        실측: 마리오 1-1 요청은 "대시 지속시간 0.3초 / 대시 속도는 일반 이동 속도의
+        2배"다. 상한은 (0.3×2 + 0.2)/0.5 = 1.6인데 문턱이 1.85로 잡혔다.
+        """
+        spec = VerificationSpec.from_request(
+            "A/D 이동과 Shift 대시를 구현해줘. 대시 지속시간 0.3초. "
+            "대시 속도는 일반 이동 속도의 2배"
+        )
+        self.assertEqual(spec.boost_request_duration, 0.3)
+        self.assertEqual(spec.boost_speed_multiplier, 2.0)
+        self.assertAlmostEqual(spec.boost_expected_ratio(), 1.6, places=2)
+        self.assertLess(spec.boost_min_ratio(), 1.6)
 
     def test_the_measurement_window_is_no_longer_the_requested_duration(self):
         """이름이 갈렸다 — 구간 길이는 0.5초로 유지된다."""
@@ -2430,6 +2572,20 @@ class ContactVanishJudgementTests(unittest.TestCase):
             "A/D 이동을 구현하고, 적을 위에서 밟으면 적이 사라지게 해줘"))
         self.assertFalse(contract.spec.require_contact_vanish)
         self.assertEqual(contract.unreacted_contacts(), [])
+
+    def test_conjugated_vanish_wording_still_asks_for_the_check(self):
+        """`사라지`만 보면 "사라져야 한다"를 놓치고 검사가 조용히 꺼진다.
+
+        실측: 마리오 1-1 요청("코인에 닿으면 그 코인이 사라질 것")이 소멸 검사를
+        요청했는데 스펙에 안 잡혔다.
+        """
+        for wording in ("사라져야 한다", "사라질 것", "없어져야 한다"):
+            with self.subTest(wording=wording):
+                spec = VerificationSpec.from_request(
+                    "Assets/Scenes/C.unity 경로에 새 씬을 생성하고 Player와 바닥을 "
+                    f"만들어 A/D 이동을 구현하고, 코인에 닿으면 그 코인이 {wording}"
+                )
+                self.assertTrue(spec.require_contact_vanish, wording)
 
     def test_a_clear_state_request_is_out_of_scope(self):
         """깃발은 클리어 상태를 만들지 소멸하지 않는다."""

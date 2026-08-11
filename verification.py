@@ -129,7 +129,12 @@ _SCENE_OBJECT_WORDS = (
 # 본 검사는 하나도 없었다(영수증 20260803_002929 계열).
 # "닿으면 사라진다" 형태. 접촉과 소멸이 **같은 요청 안에** 있어야 한다.
 _TOUCH_PATTERN = re.compile(r"에\s*닿으면|에\s*맞으면|충돌하면|부딪히면|먹으면|획득", re.I)
-_VANISH_PATTERN = re.compile(r"사라지|없어지|제거되|파괴되|destroy|획득", re.I)
+# 활용형을 함께 받는다. `사라지`만 보면 "사라져야 한다"·"사라질 것"을 놓치고,
+# 요청이 분명히 말한 소멸 검사가 조용히 꺼진다(마리오 1-1 요청에서 실측).
+_VANISH_PATTERN = re.compile(
+    r"사라지|사라져|사라졌|사라질|없어지|없어져|없어질|제거되|파괴되|destroy|획득",
+    re.I,
+)
 # 호스트가 만들 수 없는 접촉. 입력은 좌우 이동과 제자리 점프뿐이라 "위에서 밟는"
 # 것을 재현하지 못한다. 옆에서 부딪힌 것을 "안 사라졌다"고 판정하면 오탐이다.
 _STOMP_PATTERN = re.compile(r"밟으면|밟아|위에서\s*누르|stomp|jump\s*on", re.I)
@@ -166,17 +171,20 @@ _LEFTWARD_MOTION_LABELS = frozenset({"a", "boost_left"})
 # 구간이 두 요청 형태 모두에 있고, 이 계수가 그 안에 들어간다.
 _BOOST_RATIO_TOLERANCE = 0.85
 # 요청에서 읽는 부스트 지속시간과 속도 배수.
+# 같은 기능을 요청이 부르는 이름들. `대시`만 쓴 요청에서 지속시간을 못 읽으면
+# 문턱이 다시 도달 불가능해진다(1.85 대 실제 상한 1.6).
+_BOOST_NAME_ALTERNATION = r"(?:부스트|대시|boost|dash)"
 _BOOST_DURATION_PATTERN = re.compile(
-    r"부스트[^\n]{0,20}?지속[^\n]{0,10}?([0-9]+(?:\.[0-9]+)?)\s*초"
-    r"|boost[^\n]{0,20}?duration[^\n]{0,10}?([0-9]+(?:\.[0-9]+)?)\s*s",
+    rf"{_BOOST_NAME_ALTERNATION}[^\n]{{0,20}}?지속[^\n]{{0,10}}?([0-9]+(?:\.[0-9]+)?)\s*초"
+    rf"|{_BOOST_NAME_ALTERNATION}[^\n]{{0,20}}?duration[^\n]{{0,10}}?([0-9]+(?:\.[0-9]+)?)\s*s",
     re.IGNORECASE,
 )
 # **속도** 배수만 읽는다. 같은 요청에 "부스트 이동 거리가 일반 이동의 1.4배 이상"
 # 처럼 합격 조건이 함께 적혀 있고, 그것을 배수로 읽으면 문턱이 자기 자신을 재게 된다.
 _BOOST_MULTIPLIER_PATTERN = re.compile(
-    r"부스트\s*속도[^\n]{0,30}?([0-9]+(?:\.[0-9]+)?)\s*배"
+    rf"{_BOOST_NAME_ALTERNATION}\s*속도[^\n]{{0,30}}?([0-9]+(?:\.[0-9]+)?)\s*배"
     r"|이동\s*속도의\s*([0-9]+(?:\.[0-9]+)?)\s*배"
-    r"|boost\s*speed[^\n]{0,30}?([0-9]+(?:\.[0-9]+)?)\s*(?:x|times)",
+    rf"|{_BOOST_NAME_ALTERNATION}\s*speed[^\n]{{0,30}}?([0-9]+(?:\.[0-9]+)?)\s*(?:x|times)",
     re.IGNORECASE,
 )
 # 새 씬이 기본으로 갖는 오브젝트. 이것만 남아 있으면 아무것도 만들어지지 않았다.
@@ -319,6 +327,34 @@ MUTATION_TOOLS = {
     "unity_delete_script", "unity_install_level_loader", "unity_write_level",
     "unity_execute_menu_item",
 }
+
+
+def _script_named_for(
+    request: str, script_classes: Iterable[str], subject: str
+) -> str | None:
+    """이 대상에 붙이라고 요청이 **직접 지목한** 스크립트.
+
+    철자로 고르지 않는다. 요청은 대상별 구성을 블록으로 쓰고 그 안에 클래스 이름을
+    적는다.
+
+        [Player 필수 구성]
+        - Rigidbody
+        - MarioMovement      ← 이것
+
+    이름으로 고르던 규칙은 `player`와 `movement`를 **둘 다** 요구했다. 그래서
+    `MarioMovement.cs`가 Player 필수 구성에 적혀 있는데도 요구 목록에 안 들어갔고,
+    스크립트가 아예 안 붙은 씬에서 호스트는 `player_did_not_move_right`만 말했다.
+    repair 세 사이클이 같은 자리를 맴돌았다(실측 `20260811_095736`).
+    """
+    blocks = re.split(r"\n(?=\[)|\n\s*\n", request)
+    for block in blocks:
+        head = block.strip().splitlines()[0] if block.strip() else ""
+        if subject not in head.lower():
+            continue
+        for name in script_classes:
+            if re.search(rf"(?<![A-Za-z0-9]){re.escape(name)}(?![A-Za-z0-9])", block):
+                return name
+    return None
 
 
 def _first_number(pattern: re.Pattern, request: str) -> float | None:
@@ -634,8 +670,9 @@ class VerificationSpec:
         components: dict[str, list[str]] = {}
         if movement or jump:
             components["Player"] = ["Rigidbody", "Collider"]
-            player_class = next((name for name in script_classes
-                                 if "player" in name.lower() and "movement" in name.lower()), None)
+            player_class = _script_named_for(request, script_classes, "player") or next(
+                (name for name in script_classes
+                 if "player" in name.lower() and "movement" in name.lower()), None)
             if player_class:
                 components["Player"].append(player_class)
             elif "playermovement" in lower:
@@ -1168,11 +1205,22 @@ class VerificationContract:
         request says "적", the model may call it Enemy, Patroller or Monster.
         Player is excluded because the host drives it with input; the ground and
         the platform stay in because a moving platform is the same check.
+
+        **순서가 판정을 좌우한다.** 후보는 `limit`에서 잘리는데, 계층 순서를 그대로
+        쓰면 큰 레벨에서는 바닥과 파이프가 자리를 다 차지한다. 마리오 1-1 실측
+        (`20260811_100555`)에서 오브젝트 19개 중 앞 6개가 `Ground1..Pipe3`이었고,
+        **움직이는 것은 19번째 `Goomba`뿐이었다.** 호스트는 굼바를 한 번도 재지 않고
+        `no_object_moved_on_its_own`을 냈다 — 코인 소멸도 같은 이유로 못 쟀다.
+
+        가르는 신호는 이미 있다(STATUS A0) — **붙은 사용자 스크립트**다. 굼바·코인은
+        갖고 바닥·파이프는 갖지 않는다. 그것을 앞으로 보내고 자른다. 계층을 아직
+        읽지 않았으면 전부 빈 목록이라 예전 순서 그대로다.
         """
-        return [
+        names = [
             name for name in self.created_objects()
             if name.strip().lower() != "player"
-        ][:limit]
+        ]
+        return sorted(names, key=lambda name: not self._object_scripts(name))[:limit]
 
     def autonomous_motion_delta(self) -> tuple[str, float] | None:
         """Largest distance any sampled object covered with no input given."""
@@ -1509,9 +1557,18 @@ class VerificationContract:
         node = self._find_node(name)
         components = (node or {}).get("components")
         if not isinstance(components, list):
-            return []
-        return [
+            # 계층 스냅샷은 스크립트를 붙이기 **전에** 찍혔을 수 있다. 그 뒤에
+            # 오브젝트를 직접 조회한 기록이 있으면 그쪽이 최신이다.
+            components = self.observed_components.get(name) or []
+        scripts = [
             str(item) for item in components
+            if str(item).lower().split(".")[-1] not in self._BUILTIN_COMPONENTS
+        ]
+        if scripts:
+            return scripts
+        observed = self.observed_components.get(name)
+        return [
+            str(item) for item in (observed or [])
             if str(item).lower().split(".")[-1] not in self._BUILTIN_COMPONENTS
         ]
 
