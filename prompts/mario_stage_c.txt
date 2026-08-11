@@ -1,0 +1,81 @@
+CLI의 `--project`로 지정된 격리 프로젝트에서, **이미 있는 씬** `Assets/Scenes/Mario1A.unity`를 열어 코인과 굼바를 추가해줘. 조작과 레벨은 이미 완성돼 있다.
+
+[격리 및 오염 방지 — 최우선]
+- 이 요청의 유일한 작업 씬은 `Assets/Scenes/Mario1A.unity`다. **새 씬을 만들지 마라.** 그 씬을 열어 확장하고 같은 경로에 저장하라.
+- `Assets/Scenes`의 다른 모든 씬은 열거나 변경·저장·삭제하지 마라. **어떤 파일도 삭제하지 마라.**
+- 기존 `Player`·`Main Camera`의 위치와 `Rigidbody.constraints`(정수 120)를 **바꾸지 마라.** 이미 검증을 통과한 구성이다.
+- 기존 지형(`Ground`, `Ground2`, `Ground3`, `Pipe1~3`, `BrickRow1~2`, `QuestionBlock1`, `Step1~4`, `Flagpole`)의 좌표와 크기를 **바꾸지 마라.**
+- 새로 만들거나 고칠 수 있는 파일은 `Assets/Scripts/CoinPickup.cs`, `Assets/Scripts/GoombaPatrol.cs`, `Assets/Scripts/MarioMovement.cs` 셋뿐이다. `MarioMovement.cs`는 **코인 획득 처리만** 더하고 이동·점프·대시 코드는 건드리지 마라.
+- 검증 실패 시 씬을 재생성하지 말고 실패한 항목만 수정한 뒤 재검증하라.
+
+[중요]
+이 요청은 제작, Play Mode 실측 검증, 실패 수정, 재검증까지 포함한다.
+모델의 설명만으로 완료하지 말고 모든 합격 조건을 실제 Unity 도구 결과로 확인해라.
+최종 완료 판정은 호스트 검증에 맡겨라.
+
+[추가할 오브젝트]
+오브젝트가 3개 이상이므로 `unity_create_gameobjects` 배치 툴을 한 번에 사용해 만든다.
+
+- 코인 3개 — Sphere 프리미티브, 각각 크기 (0.5, 0.5, 0.5)
+  - Coin1: 위치 (3, 1, 0)
+  - Coin2: 위치 (5, 1, 0)
+  - Coin3: 위치 (7, 1, 0)
+- 굼바 1마리 — Cube 프리미티브, 크기 (0.8, 0.8, 0.8)
+  - Goomba: 위치 (44, 0.4, 0). Ground2 위다
+
+[코인 필수 구성 — 반드시 지켜라]
+- 각 코인에 `CoinPickup` 컴포넌트를 붙인다
+- 각 코인의 Collider는 **`isTrigger = true`**여야 한다. 이것이 없으면 획득이 성립하지 않는다
+- 코인에는 **Rigidbody를 붙이지 마라.** 붙이면 코인이 바닥으로 떨어진다
+- 코인은 트리거이므로 플레이어의 이동을 막지 않는다. 위 좌표 그대로 둔다
+
+[굼바 필수 구성]
+- `GoombaPatrol` 컴포넌트를 붙인다
+- 입력 없이 **스스로** 좌우로 순찰한다. 시작 위치 기준 좌우 3유닛 왕복, 속도 2
+- Rigidbody 없이 Collider와 transform 이동으로 구현해도 된다
+- **밟는 처리는 만들지 마라.** 순찰만 한다
+
+[코인 획득 구현]
+- `CoinPickup`은 표식 역할의 빈 MonoBehaviour여도 된다
+- `MarioMovement`의 `OnTriggerEnter(Collider other)`에서 `other.GetComponent<CoinPickup>()`이 null이 아니면 그 오브젝트를 `Destroy`한다
+- **태그를 쓰지 마라.** `CompareTag("Coin")`은 프로젝트에 없는 태그라 런타임에 던진다. 반드시 `GetComponent<CoinPickup>()`로 식별한다
+- 점수 UI는 만들지 마라
+
+[Play Mode 합격 조건]
+1. 컴파일 오류와 예외가 0건
+2. 씬이 Assets/Scenes/Mario1A.unity 로 저장되고 isDirty=false
+3. Play Mode 진입 후 런타임 오류가 0건
+4. 무입력 0.5초 동안 Player X 변화가 0.05 이하
+5. D를 1초 누르면 Player X가 2 이상 증가
+6. A를 1초 누르면 Player X가 2 이상 감소
+7. Right Arrow 입력으로도 Player X가 증가
+8. Space 입력 후 Player Y가 0.5 이상 상승
+9. 점프 후 다시 바닥에 착지
+10. D만 0.5초 입력한 이동 거리와 D+LeftShift를 입력한 거리를 측정하고, 대시 이동 거리가 더 길 것
+11. A+LeftShift에서도 왼쪽 방향으로 같은 대시 효과 확인
+12. Player 이동 중 Main Camera X가 같은 방향으로 이동
+13. **플레이어가 지나간 코인이 사라질 것**
+14. **Goomba가 입력 없이 스스로 움직일 것**
+15. Play 중 Game View 스크린샷 저장
+16. 모든 가상 키의 held와 pendingReleases가 비어 있음
+17. 검증 종료 후 Play Mode가 반드시 종료됨
+
+[검증 순서]
+- 씬과 컴포넌트 확인
+- 컴파일 오류 확인
+- Play Mode 진입
+- 굼바 자율 이동 측정
+- 무입력 기준 좌표 측정
+- D 이동 측정
+- A 이동 측정
+- Space 점프의 여러 시점 Y 좌표 측정
+- 일반 이동과 Shift 대시 이동 거리를 동일한 시간으로 비교
+- 카메라 좌표 변화 측정
+- 코인 소멸 확인
+- 런타임 오류 확인
+- 스크린샷 생성
+- 모든 키 해제
+- Play Mode 종료
+- 최종 상태 확인
+
+합격 조건 중 하나라도 측정되지 않았거나 실패하면 완료라고 보고하지 말고 수정 후 해당 검증을 반복해라.
