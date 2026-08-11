@@ -149,6 +149,19 @@ _AUTONOMOUS_WORDS = (
 # 한쪽 이동이 반대쪽의 이 비율에 못 미치면 그 방향이 막힌 것으로 본다. 기록된
 # 119건의 분포에서 정상은 0.96 이상, 막힌 것은 0.42 이하이고 그 사이가 비어 있다.
 _BLOCKED_PATH_RATIO = 0.5
+# 비율만으로는 갈리지 않는 구간(0.5~0.85)은 **멈춘 자리의 기하**로 판정한다.
+# 2026-08-10 재현성 측정 5회에서 같은 원인(시작 통로를 막은 플랫폼)의 비율이
+# 0.492 / 0.502 / 0.570으로 나와 문턱을 사이에 두고 1건만 발동했다. 정상 구간은
+# 여전히 0.96 이상이므로 이 상한은 건강한 실행을 건드리지 않는다.
+_BLOCKED_PATH_GEOMETRY_RATIO = 0.85
+# 멈춘 표면과 벽면 사이 간격이 이 안이면 그 벽이 멈춰 세운 것으로 본다. 접촉은
+# 간격 0에서 일어나고, 관성으로 조금 못 미쳐 멈추는 경우까지 받는다.
+_BLOCKING_CONTACT_GAP = 0.35
+# 세로로 겹치는 폭이 이만큼은 되어야 "막았다"고 본다. 딱 맞닿아 있는 것(= 밟고
+# 서 있는 바닥)은 겹치지 않으므로 이 조건에서 빠진다.
+_BLOCKING_VERTICAL_MARGIN = 0.05
+# 왼쪽으로 재는 구간. 나머지는 오른쪽이다.
+_LEFTWARD_MOTION_LABELS = frozenset({"a", "boost_left"})
 # 새 씬이 기본으로 갖는 오브젝트. 이것만 남아 있으면 아무것도 만들어지지 않았다.
 _DEFAULT_SCENE_OBJECTS = frozenset({
     "main camera", "directional light", "global volume",
@@ -1485,6 +1498,56 @@ class VerificationContract:
             )
         return None
 
+    def blocking_object(self, label: str) -> str | None:
+        """이 구간을 멈춰 세운 벽의 이름. 없으면 None.
+
+        비율 판정이 못 가르는 구간이 있다. 2026-08-10 재현성 측정에서 **같은 원인**
+        (시작 통로 안에 놓인 Platform1)의 d/a 비율이 0.492 / 0.502 / 0.570으로
+        나와 문턱 0.5를 사이에 두고 3건 중 1건만 발동했다. 비율은 원인의 대리
+        지표일 뿐이고, 원인 자체는 영수증에 이미 기하로 들어 있다.
+
+        판정은 두 조건이 동시에 성립할 때만 한다.
+
+            멈춘 표면과 벽면이 맞닿아 있고 (간격 0 근방)
+            세로로 실제로 겹친다        (비켜 지나갈 수 없다)
+
+        딱 맞닿기만 한 것 — 밟고 서 있는 바닥 — 은 두 번째에서 빠진다. 진행 방향
+        뒤에 있는 것도 보지 않는다.
+        """
+        before = self.motion_before.get(label)
+        after = self.motion_after.get(label)
+        player_half = self._half_extents("player", self.latest_scales.get("player"))
+        if before is None or after is None or player_half is None:
+            return None
+        sign = -1.0 if label in _LEFTWARD_MOTION_LABELS else 1.0
+        stop_face = after[0] + sign * player_half[0]
+        for name, sample in self.contact_before.items():
+            if name.strip().lower() == "player":
+                continue
+            pos = sample.get("position")
+            half = self._half_extents(name, sample.get("scale"))
+            if pos is None or half is None:
+                continue
+            if sign * (pos[0] - before[0]) <= 0:
+                continue                       # 진행 방향 뒤 — 이 구간과 무관하다
+            gap = sign * ((pos[0] - sign * half[0]) - stop_face)
+            if not _CONTACT_OVERLAP_LIMIT <= gap <= _BLOCKING_CONTACT_GAP:
+                continue                       # 멈춘 자리가 아니다
+            overlap = half[1] + player_half[1] - abs(pos[1] - after[1])
+            if overlap <= _BLOCKING_VERTICAL_MARGIN:
+                continue                       # 위아래로 비켜 있다 — 밟거나 지난다
+            return name
+        return None
+
+    def blocking_objects(self) -> dict[str, str]:
+        """구간별로 멈춰 세운 벽. 영수증에 남겨 다음 사이클이 좌표를 볼 수 있게 한다."""
+        found = {}
+        for label in ("d", "a", "boost_shift", "boost_left"):
+            name = self.blocking_object(label)
+            if name is not None:
+                found[label] = name
+        return found
+
     def _blocked_movement_direction(self, d, a) -> str | None:
         """Which direction a wall stopped, or None if this is not that shape.
 
@@ -1522,6 +1585,13 @@ class VerificationContract:
         if long_ > self.spec.movement_max_distance(long_duration):
             return None                       # 폭주 물리는 별개 결함이다
         if short >= long_ * _BLOCKED_PATH_RATIO:
+            # 빈 구간이다. 비율로는 못 가르지만 **멈춘 자리에 벽이 있으면** 원인이
+            # 확정된다 — 추정 대신 기하로 판정한다. 정상 구간(0.96 이상)은 상한에서
+            # 걸러지므로 통과하던 실행이 새로 실패하지 않는다.
+            if short < long_ * _BLOCKED_PATH_GEOMETRY_RATIO and self.blocking_object(
+                short_name
+            ):
+                return short_name
             return None
         return short_name
 
@@ -1920,6 +1990,9 @@ class VerificationContract:
             ),
             # 판정에 쓰지 않는 기록. A0(접촉 반응 검사)의 설계 입력이다.
             "contact_candidates": self.contact_report() or None,
+            # 어느 구간이 무엇에 막혔는지. `movement_path_blocked`의 근거이고,
+            # repair가 옮겨야 할 오브젝트를 이름으로 준다.
+            "blocking_objects": self.blocking_objects() or None,
             # 이 값이 크면 위의 `surface_gap`을 액면 그대로 읽으면 안 된다.
             # 구르는 캡슐은 세로 반폭이 1.0에서 0.5로 줄고, 호스트는 구간 양 끝에서만
             # 형상을 재므로 그 사이의 겹침을 과장한다. 실측 A/B: 같은 간격 −0.199에서
@@ -2208,6 +2281,17 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
                 "unity_get_hierarchy로 좌표를 확인한 뒤 unity_modify_gameobject로 "
                 "옮긴다. 새 씬을 만들지 말고 스크립트도 다시 쓰지 마라."
             )
+            # 호스트는 어느 오브젝트가 막았는지 이미 알고 있다. 이름을 주지 않으면
+            # repair가 계층 전체를 다시 훑고, 엉뚱한 것을 옮긴다.
+            culprit = (evidence.get("blocking_objects") or {}).get(
+                "d" if failure.endswith(":d") else "a"
+            )
+            if culprit:
+                lint_guidance.append(
+                    f"- 막은 것은 `{culprit}`이다. 이 오브젝트의 position.x를 시작 "
+                    "지점에서 8유닛 밖으로 옮기거나, 밑면이 플레이어 머리보다 높도록 "
+                    "position.y를 올린다. 다른 오브젝트는 건드리지 마라."
+                )
         if "a_did_not_move_left" in failure or "left_boost_distance_too_short" in failure:
             lint_guidance.append(
                 "- 왼쪽 이동 실패: Player 시작 위치가 플랫폼 끝면/중복 콜라이더에 "
@@ -2261,6 +2345,21 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
                 f"일반 이동의 {spec.boost_max_ratio}배를 넘으면 실패로 판정한다."
             )
         if failure in {"boost_distance_too_short", "left_boost_distance_too_short"}:
+            walls = evidence.get("blocking_objects") or {}
+            blocked_label = (
+                "boost_left" if failure.startswith("left_") else "boost_shift"
+            )
+            if walls.get(blocked_label) or walls:
+                # 막힌 방향에서는 부스트가 아무리 빨라져도 거리가 같다. 여기서
+                # 코드 수정 안내를 함께 주면 repair가 그쪽으로 간다 — 실측
+                # 20260810_112730이 같은 실패로 두 사이클을 태웠다.
+                lint_guidance.append(
+                    f"- 부스트 거리 부족은 **결과이지 원인이 아니다**: "
+                    f"`{walls.get(blocked_label) or next(iter(walls.values()))}`이 "
+                    "경로를 막아 일반 이동과 부스트가 같은 지점에서 멈췄다. "
+                    "부스트 코드를 고치지 말고 그 오브젝트를 옮긴 뒤 다시 측정해라."
+                )
+                continue
             # 실제 실행에서 본 형태: 대시를 AddForce impulse로 주는데 같은
             # FixedUpdate가 rb.linearVelocity를 통째로 대입해 그 impulse를 지웠다.
             # 측정 비율이 1.04로 나왔고 repair 2회가 원인을 못 짚었다.

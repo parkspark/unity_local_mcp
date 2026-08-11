@@ -1903,6 +1903,115 @@ class BlockedMovementPathTests(unittest.TestCase):
         )
 
 
+class CorridorWallDecidesTheAmbiguousBandTests(unittest.TestCase):
+    """비율이 못 가르는 구간을 멈춘 자리의 기하로 판정한다.
+
+    2026-08-10 재현성 측정(v1.12.4 프롬프트 5회, verified 0/5)에서 세 회차가 **같은
+    원인**으로 실패했다 — 빌더가 시작 통로 안 x[3..7]에 플레이어 머리보다 낮은
+    Platform1을 놓아 오른쪽 이동이 x=2.5에서 멈췄다. d/a 비율은
+
+        repro1  2.500 / 5.078 = 0.492   → 발동
+        repro3  2.500 / 4.980 = 0.502   → 침묵
+        repro5  2.500 / 4.383 = 0.570   → 침묵
+
+    문턱 0.5를 사이에 두고 1건만 이름을 받았고, 나머지 둘은 `boost_distance_too_short`
+    로만 나와 repair가 멀쩡한 부스트 코드를 고치러 갔다(repro5는 같은 실패로 두
+    사이클을 태웠다). 원인은 영수증의 `contact_candidates`에 기하로 이미 들어 있었다.
+    """
+
+    # 실측 repro5의 씬. Platform1 밑면 0.75 < 플레이어 머리 0.966.
+    WALL = {"position": (5.0, 1.0, 0.0), "scale": (4.0, 0.5, 4.0)}
+    GROUND = {"position": (0.0, -0.5, 0.0), "scale": (20.0, 1.0, 4.0)}
+
+    def _contract(self, dx, ax, wall=None, player_y=0.466):
+        spec = VerificationSpec.from_request(
+            "Assets/Scenes/M.unity 경로에 새 씬을 생성하고 Player와 바닥을 만들어 "
+            "A/D 좌우 이동을 구현해줘"
+        )
+        contract = VerificationContract(spec=spec, project_dir="")
+        contract.latest_scales["player"] = (1.0, 1.0, 1.0)
+        contract.motion_duration["d"] = contract.motion_duration["a"] = 1.0
+        contract.motion_before["d"] = (0.0, player_y, 0.0)
+        contract.motion_after["d"] = (dx, player_y, 0.0)
+        contract.motion_before["a"] = (0.0, player_y, 0.0)
+        contract.motion_after["a"] = (ax, player_y, 0.0)
+        contract.contact_before["Ground"] = dict(self.GROUND)
+        if wall is not None:
+            contract.contact_before["Platform1"] = dict(wall)
+        return contract
+
+    def test_the_two_samples_the_ratio_threshold_missed(self):
+        """repro3(0.502)·repro5(0.570) — 같은 벽인데 이름을 못 받았다."""
+        for dx, ax in ((2.5, -4.980), (2.5, -4.383)):
+            with self.subTest(ax=ax):
+                failures = self._contract(dx, ax, self.WALL).failures()
+                self.assertIn("movement_path_blocked:d", failures)
+
+    def test_the_wall_is_named(self):
+        contract = self._contract(2.5, -4.383, self.WALL)
+        self.assertEqual(contract.blocking_object("d"), "Platform1")
+        self.assertEqual(contract.blocking_objects(), {"d": "Platform1"})
+        self.assertEqual(contract.evidence()["blocking_objects"], {"d": "Platform1"})
+
+    def test_the_same_ratio_without_a_wall_stays_untouched(self):
+        """기하 확증이 없으면 예전대로 침묵한다 — 0.70 표본을 건드리지 않는다."""
+        for dx, ax in ((2.5, -4.383), (3.53, -5.05)):
+            with self.subTest(dx=dx):
+                failures = self._contract(dx, ax).failures()
+                self.assertFalse(
+                    any(f.startswith("movement_path_blocked") for f in failures),
+                    failures,
+                )
+
+    def test_a_platform_high_enough_to_pass_under_is_not_a_wall(self):
+        """verified였던 20260810_100610의 배치 — 밑면 y 2.0, 플레이어는 밑을 지난다."""
+        high = {"position": (5.0, 2.5, 0.0), "scale": (4.0, 1.0, 4.0)}
+        contract = self._contract(2.5, -4.383, high)
+        self.assertIsNone(contract.blocking_object("d"))
+
+    def test_the_ground_underfoot_is_never_the_wall(self):
+        """밟고 서 있는 바닥은 맞닿아 있을 뿐 겹치지 않는다."""
+        contract = self._contract(6.84, -7.02)
+        self.assertIsNone(contract.blocking_object("d"))
+        self.assertIsNone(contract.blocking_object("a"))
+
+    def test_a_healthy_run_is_left_alone_even_beside_a_platform(self):
+        """정상 구간(0.96~1.00)은 상한에서 걸러진다 — 통과하던 실행이 새로 실패하지 않는다."""
+        wall = {"position": (7.84, 1.0, 0.0), "scale": (4.0, 0.5, 4.0)}
+        failures = self._contract(6.84, -7.02, wall).failures()
+        self.assertFalse(
+            any(f.startswith("movement_path_blocked") for f in failures), failures
+        )
+
+    def test_an_object_behind_the_player_is_not_the_wall(self):
+        behind = {"position": (-5.0, 1.0, 0.0), "scale": (4.0, 0.5, 4.0)}
+        self.assertIsNone(self._contract(2.5, -4.383, behind).blocking_object("d"))
+
+    def test_the_remedy_names_the_object_to_move(self):
+        spec = VerificationSpec.from_request("A/D 좌우 이동을 구현해줘")
+        prompt = fix_prompt(
+            spec, ["movement_path_blocked:d"], {"blocking_objects": {"d": "Platform1"}}
+        )
+        self.assertIn("`Platform1`", prompt)
+        self.assertIn("8유닛", prompt)
+
+    def test_boost_guidance_stops_sending_repair_to_the_script(self):
+        """실측 repro5: 벽이 서 있는 동안 부스트 코드를 고쳐서는 통과할 수 없다."""
+        spec = VerificationSpec.from_request(
+            "A/D 좌우 이동과 Shift 부스트를 구현해줘"
+        )
+        walled = fix_prompt(
+            spec,
+            ["boost_distance_too_short"],
+            {"blocking_objects": {"boost_shift": "Platform1"}},
+        )
+        self.assertIn("결과이지 원인이 아니다", walled)
+        self.assertNotIn("ForceMode.Impulse", walled)
+        # 벽이 없으면 예전 안내가 그대로 나와야 한다.
+        plain = fix_prompt(spec, ["boost_distance_too_short"], {})
+        self.assertIn("ForceMode.Impulse", plain)
+
+
 class ContactCandidateRecordingTests(unittest.TestCase):
     """접촉 반응(A0)의 설계 입력. 판정하지 않고 거리만 기록한다.
 
