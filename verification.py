@@ -162,6 +162,23 @@ _BLOCKING_CONTACT_GAP = 0.35
 _BLOCKING_VERTICAL_MARGIN = 0.05
 # 왼쪽으로 재는 구간. 나머지는 오른쪽이다.
 _LEFTWARD_MOTION_LABELS = frozenset({"a", "boost_left"})
+# 부스트 문턱이 기대 비율까지 가는 비율. 기록된 55건에서 성공과 실패 사이의 빈
+# 구간이 두 요청 형태 모두에 있고, 이 계수가 그 안에 들어간다.
+_BOOST_RATIO_TOLERANCE = 0.85
+# 요청에서 읽는 부스트 지속시간과 속도 배수.
+_BOOST_DURATION_PATTERN = re.compile(
+    r"부스트[^\n]{0,20}?지속[^\n]{0,10}?([0-9]+(?:\.[0-9]+)?)\s*초"
+    r"|boost[^\n]{0,20}?duration[^\n]{0,10}?([0-9]+(?:\.[0-9]+)?)\s*s",
+    re.IGNORECASE,
+)
+# **속도** 배수만 읽는다. 같은 요청에 "부스트 이동 거리가 일반 이동의 1.4배 이상"
+# 처럼 합격 조건이 함께 적혀 있고, 그것을 배수로 읽으면 문턱이 자기 자신을 재게 된다.
+_BOOST_MULTIPLIER_PATTERN = re.compile(
+    r"부스트\s*속도[^\n]{0,30}?([0-9]+(?:\.[0-9]+)?)\s*배"
+    r"|이동\s*속도의\s*([0-9]+(?:\.[0-9]+)?)\s*배"
+    r"|boost\s*speed[^\n]{0,30}?([0-9]+(?:\.[0-9]+)?)\s*(?:x|times)",
+    re.IGNORECASE,
+)
 # 새 씬이 기본으로 갖는 오브젝트. 이것만 남아 있으면 아무것도 만들어지지 않았다.
 _DEFAULT_SCENE_OBJECTS = frozenset({
     "main camera", "directional light", "global volume",
@@ -302,6 +319,15 @@ MUTATION_TOOLS = {
     "unity_delete_script", "unity_install_level_loader", "unity_write_level",
     "unity_execute_menu_item",
 }
+
+
+def _first_number(pattern: re.Pattern, request: str) -> float | None:
+    """패턴이 잡은 첫 숫자. 대안(alternation)마다 그룹이 하나씩이라 채워진 것을 고른다."""
+    match = pattern.search(request)
+    if match is None:
+        return None
+    value = next((group for group in match.groups() if group), None)
+    return None if value is None else float(value)
 
 
 def _has_word(lower: str, words: Iterable[str]) -> bool:
@@ -519,8 +545,13 @@ class VerificationSpec:
     move_left_key: str = "leftArrow"
     movement_keys_explicit: bool = False
     jump_key: str = "space"
-    boost_duration: float = 0.5
-    boost_min_ratio: float = 1.4
+    # 호스트가 거리를 재는 **구간 길이**다. 요청이 말하는 부스트 지속시간과는 다른
+    # 것인데 v1.12.5까지 같은 이름을 썼고, 그 혼동이 아래 문턱을 어긋나게 했다.
+    boost_measure_window: float = 0.5
+    # 요청이 명시한 부스트 지속시간·배수. 없으면 None이고 그때는 구간 내내
+    # 부스트가 걸린 것으로 본다.
+    boost_request_duration: float | None = None
+    boost_speed_multiplier: float | None = None
     # 하한만 있으면 "빨라지기는 했다"가 무엇이든 통과한다. 실측에서 0.5초에 140유닛을
     # 간 대시(일반 이동의 56배)가 그대로 통과했고, 플레이어가 화면 밖으로 나가 뒤이은
     # 카메라 측정까지 망가뜨렸다. 이동은 v1.11.4, 점프는 v1.11.9에서 같은 이유로 상한을
@@ -540,6 +571,38 @@ class VerificationSpec:
         return self.movement_max_speed * (
             self.movement_duration if duration is None else duration
         )
+
+    def boost_expected_ratio(self) -> float:
+        """요청대로 정확히 구현했을 때 나올 거리 비율.
+
+        부스트가 구간 내내 걸리면 비율은 배수 그대로다. 그러나 요청이 **지속시간**을
+        따로 말하면 그 시간만 빨라지고 나머지는 일반 속도다.
+
+            (0.18 × 2 + 0.32) / 0.5 = 1.36
+
+        v1.12.5까지 문턱은 1.4 고정이었고, 그래서 **요청을 완벽히 지킨 구현이
+        통과할 수 없었다.** 기록된 55건의 분포가 두 형태를 그대로 보여준다 —
+        지속시간을 말한 요청은 1.38~1.46, 말하지 않은 요청은 1.96~2.72.
+        """
+        multiplier = self.boost_speed_multiplier or 2.0
+        duration = self.boost_request_duration
+        window = self.boost_measure_window
+        if duration is None or window <= 0 or duration >= window:
+            return multiplier
+        return (duration * multiplier + (window - duration)) / window
+
+    def boost_min_ratio(self) -> float:
+        """통과 문턱. 기대 비율까지 가는 길의 일부만 요구한다.
+
+        키 입력 지연, 물리 스텝(0.02초), 가속 구간 때문에 실측은 기대치에 못 미친다.
+        기록된 분포에서 두 형태 모두 **성공과 실패 사이가 비어 있다**.
+
+            지속시간 명시   실패 ≤ 1.24   성공 ≥ 1.38    기대 1.36 → 문턱 1.31
+            명시 없음       실패 ≤ 1.22   성공 ≥ 1.96    기대 2.00 → 문턱 1.85
+
+        두 빈 구간 안에 같은 계수 0.85가 들어간다.
+        """
+        return 1.0 + (self.boost_expected_ratio() - 1.0) * _BOOST_RATIO_TOLERANCE
 
     @classmethod
     def from_request(cls, request: str, force: bool = False) -> "VerificationSpec":
@@ -644,6 +707,8 @@ class VerificationSpec:
                 or "z position and rotation" in lower
             ),
             require_boost=boost,
+            boost_request_duration=_first_number(_BOOST_DURATION_PATTERN, request),
+            boost_speed_multiplier=_first_number(_BOOST_MULTIPLIER_PATTERN, request),
             require_bidirectional=movement and bool(
                 _AD_SCHEME.search(request)
                 or _has_word(lower, _BIDIRECTIONAL_WORDS)
@@ -756,7 +821,7 @@ class VerificationSpec:
             checks.append("Rigidbody가 Z 위치와 X/Y/Z 회전을 모두 고정")
         if self.require_boost:
             checks.append(
-                f"D 이동 대비 D+LeftShift 이동 거리가 {self.boost_min_ratio}배 이상"
+                f"D 이동 대비 D+LeftShift 이동 거리가 {self.boost_min_ratio():.2f}배 이상"
             )
         if self.require_left_boost:
             checks.append("A+LeftShift도 왼쪽으로 동일한 부스트 효과")
@@ -1861,7 +1926,7 @@ class VerificationContract:
             else:
                 normal = abs(normal_after[0] - normal_before[0])
                 boosted = abs(boost_after[0] - boost_before[0])
-                if normal <= 1e-3 or boosted < normal * self.spec.boost_min_ratio:
+                if normal <= 1e-3 or boosted < normal * self.spec.boost_min_ratio():
                     failed.append("boost_distance_too_short")
                 elif boosted > normal * self.spec.boost_max_ratio:
                     failed.append("boost_moved_too_far")
@@ -1875,7 +1940,7 @@ class VerificationContract:
                 else:
                     left = abs(left_after[0] - left_before[0])
                     if left_after[0] >= left_before[0] or normal <= 1e-3 or (
-                        left < normal * self.spec.boost_min_ratio
+                        left < normal * self.spec.boost_min_ratio()
                     ):
                         failed.append("left_boost_distance_too_short")
         if self.spec.require_screenshot:
@@ -2372,7 +2437,7 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
                 "rb.linearVelocity = new Vector3(axis * speed, rb.linearVelocity.y, 0f); "
                 "boosting은 Keyboard.current.leftShiftKey.isPressed로 읽는다. "
                 "호스트는 이동키와 leftShift를 함께 0.5초 누른 거리를 같은 시간 일반 "
-                f"이동 거리와 비교해 {spec.boost_min_ratio}배 이상일 때만 통과시킨다."
+                f"이동 거리와 비교해 {spec.boost_min_ratio():.2f}배 이상일 때만 통과시킨다."
             )
             # 실측: Platform이 x=3~7, 플레이어 높이에 놓여 오른쪽 이동이 2.06에서
             # 멈췄다(반대 방향은 4.96). 막힌 방향에서는 부스트가 빨라져도 거리가

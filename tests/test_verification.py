@@ -1578,7 +1578,7 @@ class BoostRepairGuidanceTests(unittest.TestCase):
         prompt = fix_prompt(spec, ["boost_distance_too_short"], {"motion_deltas": {}})
         self.assertIn("linearVelocity", prompt)
         self.assertIn("leftShiftKey", prompt)
-        self.assertIn(str(spec.boost_min_ratio), prompt)
+        self.assertIn(f"{spec.boost_min_ratio():.2f}", prompt)
 
     def test_a_dash_that_launches_the_player_off_screen_is_rejected(self):
         """실측: 0.5초에 140유닛(일반 이동의 56배)을 간 대시가 통과했다.
@@ -1901,6 +1901,75 @@ class BlockedMovementPathTests(unittest.TestCase):
         self.assertEqual(
             failure_check_name("movement_path_blocked:d"), "bidirectional"
         )
+
+
+class BoostThresholdFollowsTheRequestTests(unittest.TestCase):
+    """문턱 1.4 고정은 요청의 파라미터와 어긋나 있었다.
+
+    요청은 **부스트 지속 0.18초·속도 2배**라고 쓰고 호스트는 **0.5초 구간**의 거리를
+    비교한다. 요청대로 정확히 구현하면 비율의 상한은 (0.18×2 + 0.32)/0.5 = **1.36**이라
+    문턱 1.4를 넘을 수 없었다 — 통과한 회차는 지속시간이나 배수를 요청보다 크게 잡은
+    쪽이었다. 판정이 구현 품질이 아니라 요청 위반 정도로 갈렸다.
+
+    영수증 55건의 비율 분포가 두 형태를 그대로 보여준다.
+
+        지속시간 명시   실패 ≤ 1.24   성공 ≥ 1.38   (기대 1.36)
+        명시 없음       실패 ≤ 1.22   성공 ≥ 1.96   (기대 2.00)
+    """
+
+    STATED = (
+        "A/D 좌우 이동과 Shift 부스트를 구현해줘. "
+        "부스트 지속시간 0.18초. 부스트 속도는 일반 이동 속도의 2배. "
+        "부스트 이동 거리가 일반 이동의 1.4배 이상인지 검증해줘"
+    )
+    UNSTATED = "A/D 이동과 LeftShift 부스트를 구현해줘. 부스트 속도는 2배"
+
+    def test_the_request_numbers_are_read(self):
+        spec = VerificationSpec.from_request(self.STATED)
+        self.assertEqual(spec.boost_request_duration, 0.18)
+        self.assertEqual(spec.boost_speed_multiplier, 2.0)
+
+    def test_the_pass_criterion_is_not_mistaken_for_the_speed_multiplier(self):
+        """같은 요청에 적힌 '1.4배 이상'을 배수로 읽으면 문턱이 자기 자신을 잰다."""
+        self.assertEqual(
+            VerificationSpec.from_request(self.STATED).boost_speed_multiplier, 2.0
+        )
+
+    def test_the_ceiling_the_request_actually_allows(self):
+        spec = VerificationSpec.from_request(self.STATED)
+        self.assertAlmostEqual(spec.boost_expected_ratio(), 1.36, places=2)
+        self.assertLess(spec.boost_min_ratio(), 1.36)
+
+    def test_a_request_without_a_duration_keeps_the_full_multiplier(self):
+        spec = VerificationSpec.from_request(self.UNSTATED)
+        self.assertEqual(spec.boost_expected_ratio(), 2.0)
+        self.assertAlmostEqual(spec.boost_min_ratio(), 1.85, places=2)
+
+    def test_both_thresholds_land_in_the_measured_empty_band(self):
+        """실측 분포의 성공/실패 사이에 문턱이 들어가야 한다."""
+        stated = VerificationSpec.from_request(self.STATED).boost_min_ratio()
+        self.assertTrue(1.24 < stated < 1.38, stated)
+        unstated = VerificationSpec.from_request(self.UNSTATED).boost_min_ratio()
+        self.assertTrue(1.22 < unstated < 1.96, unstated)
+
+    def test_the_measured_samples_are_judged_the_way_the_receipts_read(self):
+        """실측 비율을 그대로 통과/실패로 되돌린다."""
+        spec = VerificationSpec.from_request(self.STATED)
+        for ratio, expected_pass in (
+            (1.393, True),   # repro6 — 요청대로 구현했는데 실패했던 값
+            (1.402, True),   # repro8
+            (1.432, True),   # repro7 (당시에도 통과)
+            (1.077, False),  # repro9 — 부스트가 실제로 지워진 형태
+            (0.997, False),  # repro1 — 벽에 막혀 같은 거리
+        ):
+            with self.subTest(ratio=ratio):
+                self.assertEqual(ratio >= spec.boost_min_ratio(), expected_pass)
+
+    def test_the_measurement_window_is_no_longer_the_requested_duration(self):
+        """이름이 갈렸다 — 구간 길이는 0.5초로 유지된다."""
+        spec = VerificationSpec.from_request(self.STATED)
+        self.assertEqual(spec.boost_measure_window, 0.5)
+        self.assertNotEqual(spec.boost_measure_window, spec.boost_request_duration)
 
 
 class CorridorWallDecidesTheAmbiguousBandTests(unittest.TestCase):

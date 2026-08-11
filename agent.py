@@ -966,13 +966,13 @@ class Agent:
                     await measure_motion("d", "d", spec.movement_duration)
                     await measure_motion("a", "a", spec.movement_duration)
                 if spec.require_boost:
-                    await measure_motion("boost_normal", "d", spec.boost_duration)
+                    await measure_motion("boost_normal", "d", spec.boost_measure_window)
                     await measure_motion(
-                        "boost_shift", "d", spec.boost_duration, boost=True
+                        "boost_shift", "d", spec.boost_measure_window, boost=True
                     )
                     if spec.require_left_boost:
                         await measure_motion(
-                            "boost_left", "a", spec.boost_duration, boost=True
+                            "boost_left", "a", spec.boost_measure_window, boost=True
                         )
                 if spec.require_jump and "jump" not in contract.blocked_by and await restart_play():
                     # Capture two post-input samples so a brief apex is not
