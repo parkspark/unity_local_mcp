@@ -1903,6 +1903,42 @@ class BlockedMovementPathTests(unittest.TestCase):
         )
 
 
+class ConstraintsRemedyNamesTheMissingAxisTests(unittest.TestCase):
+    """호스트는 어느 축이 빠졌는지 알면서 현재 정수만 말했다.
+
+    기록된 39건이 두 반쪽에 몰려 있다 — 8(위치만) 9건, 112(회전만) 6건, 0 19건.
+    실행 29건 중 **6건이 2사이클 이상** 같은 값으로 남았다(`20260810_093928`은
+    112를 네 사이클 내리, `20260811_100555`는 56을 세 사이클).
+    """
+
+    def _prompt(self, value):
+        spec = VerificationSpec.from_request(
+            "Assets/Scenes/M.unity 경로에 새 씬을 생성하고 A/D 이동을 구현하고 "
+            "Player의 Z 이동과 회전을 고정해줘"
+        )
+        return fix_prompt(spec, [f"rigidbody_constraints_incomplete:{value}"], {})
+
+    def test_rotation_only_is_told_which_axis_is_missing(self):
+        prompt = self._prompt(112)
+        self.assertIn("FreezePositionZ", prompt)
+        self.assertIn("112 + 8 = 120", prompt)
+
+    def test_position_only_is_told_the_three_rotations(self):
+        prompt = self._prompt(8)
+        self.assertIn("FreezeRotationX | FreezeRotationY | FreezeRotationZ", prompt)
+        self.assertIn("8 + 112 = 120", prompt)
+
+    def test_the_measured_partial_state_is_named(self):
+        """실측 56 — Z 위치와 X·Y 회전만 잠갔다."""
+        prompt = self._prompt(56)
+        self.assertIn("빠진 것은 FreezeRotationZ", prompt)
+        self.assertIn("56 + 64 = 120", prompt)
+
+    def test_the_two_surface_guidance_is_still_there(self):
+        prompt = self._prompt(112)
+        self.assertIn("씬 값만 고치면", prompt)
+
+
 class CandidatesLeaveRoomForTheMoversTests(unittest.TestCase):
     """큰 레벨에서 후보 자리를 구조물이 다 차지했다.
 

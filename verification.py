@@ -2301,6 +2301,24 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
                 "붙이지 않는다."
             )
         if "rigidbody_constraints_incomplete:" in failure:
+            # 호스트는 **어느 축이 빠졌는지** 알면서 현재 정수만 말했다. 모델이
+            # 비트 연산을 직접 해야 했고, 기록된 39건이 두 반쪽에 몰려 있다 —
+            # 8(위치만) 9건, 112(회전만) 6건, 0 19건. 실행 29건 중 6건이
+            # 2사이클 이상 같은 값으로 남았다. 빠진 축을 이름으로 준다.
+            current = failure.rsplit(":", 1)[-1]
+            if current.isdigit():
+                value = int(current)
+                missing = [
+                    label for bit, label in (
+                        (8, "FreezePositionZ"), (16, "FreezeRotationX"),
+                        (32, "FreezeRotationY"), (64, "FreezeRotationZ"),
+                    ) if (value & bit) != bit
+                ]
+                lint_guidance.append(
+                    f"- 지금 값은 {value}이고 **빠진 것은 {' | '.join(missing)}**이다. "
+                    f"{value} + {120 - value} = 120이 되도록 그 축만 더한다. "
+                    "다른 축을 건드리지 마라."
+                )
             lint_guidance.append(
                 "- rigidbody_constraints_incomplete: Player Rigidbody.constraints를 "
                 "FreezePositionZ | FreezeRotationX | FreezeRotationY | "
