@@ -239,7 +239,8 @@ async def make_plan(
                 messages=messages,
                 format=PLAN_JSON_SCHEMA,  # Ollama structured output: 디코딩 수준 제약
                 keep_alive=config.KEEP_ALIVE,
-                options={"num_ctx": config.NUM_CTX, "temperature": temperature},
+                think=config.reasoning_option(),
+                options=config.model_options(model=model, temperature=temperature),
             )
         except Exception as e:
             on_warn(f"플래닝 호출 실패({type(e).__name__}: {e}) — 단일 루프로 진행합니다.")

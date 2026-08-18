@@ -1,5 +1,6 @@
 import json
 import unittest
+from unittest import mock
 
 import config
 import planner
@@ -181,6 +182,24 @@ class DegradationIsRecordedTests(unittest.IsolatedAsyncioTestCase):
         }))
         self.assertIsNotNone(plan)
         self.assertEqual(seen, [])
+
+    async def test_planner_uses_shared_reasoning_context_and_mtp_options(self):
+        class CapturingClient(self._Client):
+            async def chat(inner_self, **kwargs):
+                inner_self.kwargs = kwargs
+                return DegradationIsRecordedTests._Resp(inner_self._content)
+
+        client = CapturingClient('{"mode": "single", "milestones": []}')
+        with mock.patch.object(config, "NUM_CTX", 65536), \
+             mock.patch.object(config, "REASONING_EFFORT", "medium"), \
+             mock.patch.object(config, "MTP_DRAFT_TOKENS", 4):
+            await planner.make_plan(
+                client, "qwen3.8:27b-mtp-q4_K_M", "큰 게임을 만들어줘"
+            )
+
+        self.assertEqual(client.kwargs["think"], "medium")
+        self.assertEqual(client.kwargs["options"]["num_ctx"], 65536)
+        self.assertEqual(client.kwargs["options"]["draft_num_predict"], 4)
 
 
 class PlanInputTests(unittest.TestCase):

@@ -1,6 +1,6 @@
 # AGENTS.md — unity_local_mcp 작업 규칙
 
-로컬 LLM(Ollama `qwen3-coder:30b`)으로 Unity Editor를 제어하는 에이전트 CLI.
+로컬 LLM(Ollama `qwen3.8:27b-mtp-q4_K_M`)으로 Unity Editor를 제어하는 에이전트 CLI.
 현재 v1.12.7. 이 저장소에서 작업하는 모든 에이전트는 아래 규칙을 따른다.
 
 ---
@@ -13,7 +13,7 @@
 | | 담당 |
 |---|---|
 | 구조·코드 개선 (`agent.py`, `verification.py`, 브리지 C# 등) | 너 (Codex/Claude) |
-| 사용자 명령의 실제 실행 — 게임 제작, 도구 호출 | 로컬 모델 `qwen3-coder:30b` |
+| 사용자 명령의 실제 실행 — 게임 제작, 도구 호출 | 로컬 모델 `qwen3.8:27b-mtp-q4_K_M` |
 
 **E2E 검증은 반드시 로컬 모델이 직접 도구를 호출하게 한다.**
 
@@ -79,7 +79,7 @@ uv run python main.py --prompt-file <파일>
 ## 4. 실행 전제 조건
 
 - **Unity Editor가 열려 있어야 한다.** Console에 `[McpBridge] Listening` 확인
-- **Ollama 실행 중** — `ollama serve`, `qwen3-coder:30b` 필요
+- **Ollama 실행 중** — `ollama serve`, `qwen3.8:27b-mtp-q4_K_M` 필요
 - 프로젝트 경로: `--project` 인자 또는 `UNITY_PROJECT_DIR` 환경변수.
   **실행 전 `unity_ping`으로 Editor가 실제로 어느 프로젝트를 열고 있는지 확인하고
   거기에 맞춘다.** 사용자가 테스트마다 새 프로젝트를 여는 경우가 있고, 불일치 상태로
@@ -91,7 +91,7 @@ uv run python main.py --prompt-file <파일>
 ## 5. 표준 명령
 
 ```bash
-# 테스트 (현재 372개 통과, subtest 71개 통과)
+# 테스트 (현재 374개 통과, subtest 71개 통과)
 uv run python -m pytest tests/
 
 # 로컬 모델 E2E — 빌더부터 전체

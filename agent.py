@@ -365,7 +365,8 @@ class Agent:
             model=self.model,
             messages=self.history if messages is None else messages,
             keep_alive=config.KEEP_ALIVE,
-            options={"num_ctx": config.NUM_CTX, "temperature": config.TEMPERATURE},
+            think=config.reasoning_option(),
+            options=config.model_options(model=self.model),
         )
         if use_tools:
             kwargs["tools"] = self.tools.ollama_tools

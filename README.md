@@ -19,7 +19,7 @@
               │
         플래너 (planner.py, 큰 요청 → 마일스톤 분해)          ← v1.7
               │
-        제작 Agent 루프 (agent.py) ⇄ Ollama (qwen3-coder:30b, localhost:11434)
+        제작 Agent 루프 (agent.py) ⇄ Ollama (qwen3.8:27b-mtp-q4_K_M, localhost:11434)
               │  tool_calls  ↕ TaskContract 정책 게이트 (task_contract.py)
         MCP 클라이언트 (mcp_client.py)
               │  stdio (uv run server.py 자식 프로세스)
@@ -33,7 +33,7 @@
 ## 요구 사항
 
 - Windows + NVIDIA GPU (RTX 5090 32GB 기준으로 튜닝됨)
-- [Ollama](https://ollama.com/download) ≥ 0.9 — qwen3-coder tool-call 필요
+- [Ollama](https://ollama.com/download) ≥ 0.32.12 — Qwen3.8 MTP 로딩 필요
 - [uv](https://docs.astral.sh/uv/)
 - 옆 폴더의 `unity_mcp` 프로젝트. Unity 브리지와 필수 패키지는 선택한 Unity 프로젝트에
   자동 설치된다. 연결 전 Unity Console에 `[McpBridge] Listening`이 보여야 한다.
@@ -41,10 +41,10 @@
 ## 설치
 
 ```bash
-# 1. 모델 받기 (~19GB)
-ollama pull qwen3-coder:30b
+# 1. 모델 받기 (~17GB)
+ollama pull qwen3.8:27b-mtp-q4_K_M
 
-# 2. (권장) KV 캐시 최적화 — 32k 컨텍스트도 GPU에 여유 있게
+# 2. (권장) KV 캐시 최적화 — 65k 컨텍스트의 VRAM 사용량 절감
 setx OLLAMA_FLASH_ATTENTION 1
 setx OLLAMA_KV_CACHE_TYPE q8_0
 # 설정 후 Ollama 재시작 필요
@@ -110,7 +110,7 @@ uv run main.py --project "D:\UnityProjects\MyGame" --prompt-file docs\request.tx
 사용 중인 포트(8722, 8723 등)를 따라갑니다.
 
 ```
-연결됨: 28 tools · qwen3-coder:30b · ctx 32768
+연결됨: 28 tools · qwen3.8:27b-mtp-q4_K_M · ctx 65536
 Unity 6000.5.2f1 · My project
 
 you> 바닥 평면 만들고 그 위에 빨간 큐브 3개를 x축으로 2씩 띄워 배치해줘
@@ -158,8 +158,10 @@ MCP 서버의 21개 도구(`unity_send_key` 포함) 외에, 호스트가 직접 
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `UNITY_AGENT_MODEL` | `qwen3-coder:30b` | 사용할 Ollama 모델 |
-| `UNITY_AGENT_NUM_CTX` | `32768` | 컨텍스트 길이. VRAM 부족(CPU 분할) 시 16384로 |
+| `UNITY_AGENT_MODEL` | `qwen3.8:27b-mtp-q4_K_M` | 사용할 Ollama 모델 |
+| `UNITY_AGENT_NUM_CTX` | `65536` | 컨텍스트 길이. RTX 5090 32GB 기준 기본값; VRAM 부족 시 32768로 |
+| `UNITY_AGENT_REASONING_EFFORT` | `medium` | 추론 노력: `low` / `medium` / `high` / `off` |
+| `UNITY_AGENT_MTP_DRAFT_TOKENS` | `4` | MTP 모델의 초안 토큰 수. `0`이면 비활성화 |
 | `UNITY_AGENT_MAX_ITERS` | `30` | 한 턴의 최대 도구 호출 반복 |
 | `UNITY_AGENT_STREAM` | `1` | 스트리밍 중 tool_calls가 안 오면 `0` |
 | `UNITY_AGENT_MODEL_RETRIES` | `1` | EOF·연결 끊김·일시적 서버 오류가 난 모델 호출의 재시도 횟수 |

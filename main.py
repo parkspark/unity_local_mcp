@@ -245,7 +245,15 @@ async def main(args: argparse.Namespace | None = None):
         except (json.JSONDecodeError, KeyError):
             console.print(f"[yellow][3/4] Unity 브리지 연결 실패: {escape(ping)}[/yellow]")
 
-        console.print(f"[dim]모델: {agent.model} · context: {config.NUM_CTX}[/dim]")
+        mtp = (
+            str(config.MTP_DRAFT_TOKENS)
+            if config.MTP_DRAFT_TOKENS > 0 and "mtp" in agent.model.lower()
+            else "off"
+        )
+        console.print(
+            f"[dim]모델: {agent.model} · context: {config.NUM_CTX} · "
+            f"reasoning: {config.REASONING_EFFORT} · MTP: {mtp}[/dim]"
+        )
 
         console.print(HELP)
         if ut.last_audit_log_path:

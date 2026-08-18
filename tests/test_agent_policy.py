@@ -49,6 +49,35 @@ class ScriptedAgent(Agent):
 
 
 class AgentPolicyTests(unittest.TestCase):
+    def test_main_chat_uses_medium_reasoning_long_context_and_mtp(self):
+        class CapturingClient:
+            def __init__(self):
+                self.kwargs = None
+
+            async def chat(self, **kwargs):
+                self.kwargs = kwargs
+                return types.SimpleNamespace(
+                    message=types.SimpleNamespace(content="ok", tool_calls=[])
+                )
+
+        agent = Agent(
+            FakeTools(), lambda _text: None, lambda *_: None, lambda _warning: None,
+            enable_logging=False, enable_verification=False,
+        )
+        client = CapturingClient()
+        agent.client = client
+        agent.model = "qwen3.8:27b-mtp-q4_K_M"
+        with mock.patch.object(config, "STREAM", False), \
+             mock.patch.object(config, "NUM_CTX", 65536), \
+             mock.patch.object(config, "REASONING_EFFORT", "medium"), \
+             mock.patch.object(config, "MTP_DRAFT_TOKENS", 4):
+            content, calls = asyncio.run(agent._chat([]))
+
+        self.assertEqual((content, calls), ("ok", []))
+        self.assertEqual(client.kwargs["think"], "medium")
+        self.assertEqual(client.kwargs["options"]["num_ctx"], 65536)
+        self.assertEqual(client.kwargs["options"]["draft_num_predict"], 4)
+
     def test_retryable_ollama_transport_error_is_retried_once(self):
         class FlakyClient:
             def __init__(self):

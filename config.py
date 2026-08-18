@@ -5,12 +5,20 @@ import os
 from version import __version__
 
 # Ollama
-MODEL = os.environ.get("UNITY_AGENT_MODEL", "qwen3-coder:30b")
+MODEL = os.environ.get("UNITY_AGENT_MODEL", "qwen3.8:27b-mtp-q4_K_M")
 # qwen2.5vl:32b is installed on the target workstation. Keep this overrideable
 # for smaller machines, but do not default to a model that is absent locally.
 VISION_MODEL = os.environ.get("UNITY_AGENT_VISION_MODEL", "qwen2.5vl:32b")
-NUM_CTX = int(os.environ.get("UNITY_AGENT_NUM_CTX", "32768"))
+NUM_CTX = int(os.environ.get("UNITY_AGENT_NUM_CTX", "65536"))
 TEMPERATURE = float(os.environ.get("UNITY_AGENT_TEMPERATURE", "0.2"))
+REASONING_EFFORT = os.environ.get("UNITY_AGENT_REASONING_EFFORT", "medium").lower()
+if REASONING_EFFORT not in {"low", "medium", "high", "off"}:
+    raise ValueError(
+        "UNITY_AGENT_REASONING_EFFORT must be low, medium, high, or off"
+    )
+# Ollama's Qwen3.8 MTP tag includes a separate draft model. Four draft tokens
+# match the model manifest and enable speculative multi-token decoding.
+MTP_DRAFT_TOKENS = int(os.environ.get("UNITY_AGENT_MTP_DRAFT_TOKENS", "4"))
 KEEP_ALIVE = os.environ.get("UNITY_AGENT_KEEP_ALIVE", "30m")
 # 스트리밍 중 tool_calls가 안 오는 Ollama 버전이면 False로
 STREAM = os.environ.get("UNITY_AGENT_STREAM", "1") != "0"
@@ -25,6 +33,23 @@ TRUNCATE_CHARS = int(os.environ.get("UNITY_AGENT_TRUNCATE_CHARS", "4000"))
 LOOP_GUARD_THRESHOLD = int(os.environ.get("UNITY_AGENT_LOOP_GUARD", "4"))
 # 히스토리 트리밍 기준: 추정 토큰이 num_ctx의 이 비율을 넘으면 오래된 대화 삭제
 HISTORY_BUDGET_RATIO = 0.7
+
+
+def model_options(*, model: str | None = None, temperature: float | None = None) -> dict:
+    """Return shared Ollama runtime options for main-model calls."""
+    target = model or MODEL
+    options = {
+        "num_ctx": NUM_CTX,
+        "temperature": TEMPERATURE if temperature is None else temperature,
+    }
+    if MTP_DRAFT_TOKENS > 0 and "mtp" in target.lower():
+        options["draft_num_predict"] = MTP_DRAFT_TOKENS
+    return options
+
+
+def reasoning_option() -> str | bool:
+    """Translate the user-facing off value to Ollama's boolean API value."""
+    return False if REASONING_EFFORT == "off" else REASONING_EFFORT
 
 # 기존 Unity MCP 서버 위치 (수정 없이 재사용)
 UNITY_MCP_DIR = os.environ.get(
