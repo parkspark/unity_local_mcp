@@ -2066,6 +2066,60 @@ class PlayerScriptNamedByTheRequestTests(unittest.TestCase):
         )
 
 
+class MisplacedRequiredComponentTests(unittest.TestCase):
+    """A correct copy did not excuse a destructive copy on the wrong object.
+
+    Live receipt ``20260818_102747_183_78d54060c3`` has SideScrollerCamera on
+    both Main Camera and Player.  The old presence-only check passed the static
+    gate, then the Player followed itself and verification lost nine checks.
+    """
+
+    def _contract(self):
+        spec = VerificationSpec.from_request(
+            "Assets/Scenes/M.unity 경로에 새 씬을 생성하고 "
+            "Assets/Scripts/PlayerMovement25D.cs와 "
+            "Assets/Scripts/SideScrollerCamera.cs로 Player가 A/D 이동하고 "
+            "Main Camera가 따라가는 플랫포머를 만들어줘"
+        )
+        contract = VerificationContract(spec=spec, project_dir="")
+        contract.observed_components["Player"] = [
+            "UnityEngine.Transform", "UnityEngine.Rigidbody",
+            "UnityEngine.CapsuleCollider", "PlayerMovement25D",
+            "SideScrollerCamera",
+        ]
+        contract.observed_components["Main Camera"] = [
+            "UnityEngine.Transform", "UnityEngine.Camera", "SideScrollerCamera",
+        ]
+        return contract
+
+    def test_duplicate_on_the_wrong_target_is_a_failure(self):
+        contract = self._contract()
+        failure = "component_misplaced:Player:SideScrollerCamera:expected:Main Camera"
+        self.assertIn(failure, contract.failures())
+        self.assertEqual(failure_check_name(failure), "components:Main Camera")
+
+    def test_built_in_components_on_multiple_objects_are_not_misplaced(self):
+        contract = self._contract()
+        contract.observed_components["Main Camera"].append("UnityEngine.CapsuleCollider")
+        self.assertFalse(any(
+            component == "Collider"
+            for _, component, _ in contract.misplaced_required_components()
+        ))
+
+    def test_repair_prompt_removes_only_the_wrong_copy(self):
+        contract = self._contract()
+        failure = next(
+            item for item in contract.failures()
+            if item.startswith("component_misplaced:")
+        )
+        prompt = fix_prompt(contract.spec, [failure], {})
+        self.assertIn("unity_remove_component", prompt)
+        self.assertIn('target="Player"', prompt)
+        self.assertIn('component_type="SideScrollerCamera"', prompt)
+        self.assertIn("Main Camera", prompt)
+        self.assertIn("유지", prompt)
+
+
 class BoostThresholdFollowsTheRequestTests(unittest.TestCase):
     """문턱 1.4 고정은 요청의 파라미터와 어긋나 있었다.
 

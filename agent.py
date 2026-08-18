@@ -841,6 +841,10 @@ class Agent:
                 observed = contract.observed_components.get(target, [])
                 if any(not contract._has_component(observed, item) for item in required):
                     static_failures.append(f"component_not_ready:{target}")
+            static_failures.extend(
+                f"component_misplaced:{actual}:{component}:expected:{expected}"
+                for actual, component, expected in contract.misplaced_required_components()
+            )
             if static_failures:
                 for stage in ("gameplay", "movement", "jump", "boost", "camera", "screenshot"):
                     for reason in static_failures:

@@ -885,3 +885,20 @@ v1.9부터 제작 모델의 자연어 "완료"는 사용자에게 최종 결과�
           1.082는 그대로 실패합니다. 다만 16회 중 4회로 재현성은 여전히 낮고
           `build_stage_success`는 16회 전부 `False`입니다.
           상세: [docs/v1.12.6_boost_threshold_follows_the_request.md](docs/v1.12.6_boost_threshold_follows_the_request.md)
+
+- ver 1.12.7 - **필수 스크립트가 올바른 곳에도 있다는 사실이, 잘못된 곳의 복사본을
+          가렸습니다.** 장문 프롬프트 5회 재현에서 `verified` 2/5,
+          `build_stage_success` 0/5였고, 마지막 회차는 `SideScrollerCamera`를 Main Camera와
+          Player 양쪽에 붙였습니다. 기존 검사는 Main Camera의 올바른 복사본만 보고
+          통과시켰고, Player의 복사본은 자기 자신을 추종해 Y 수백·Z 수천 유닛으로
+          폭주하며 검사 9개를 미측정으로 만들었습니다. 이제 요청이 특정 핵심 오브젝트에
+          배정한 사용자 스크립트가 다른 핵심 오브젝트에도 붙으면
+          `component_misplaced:<actual>:<component>:expected:<target>`으로 실패시키고,
+          Play Mode 전에 모든 동작 측정을 차단합니다. repair에는
+          `unity_remove_component(remove_all=true)`로 잘못된 대상의 복사본만 제거하고
+          올바른 복사본은 유지하라고 실제 이름을 줍니다. 결함이 남은 씬을
+          `--repair-existing`으로 로컬 모델에 맡긴 실측에서 첫 검증이 오부착을 잡고
+          Player 쪽 1개만 제거했으며, 뒤이어 드러난 바닥·부스트 결함까지 고쳐 최종
+          **17/17 실측·미측정 0·`verified`**가 됐습니다. 전체 테스트는
+          **372개·subtest 71개**가 통과했습니다.
+          상세: [docs/v1.12.7_misplaced_component_gate.md](docs/v1.12.7_misplaced_component_gate.md)

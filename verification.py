@@ -1161,6 +1161,34 @@ class VerificationContract:
         return any(item.lower() == required or item.lower().endswith("." + required)
                    for item in observed)
 
+    def misplaced_required_components(self) -> list[tuple[str, str, str]]:
+        """Requested scripts attached to another explicitly named core object.
+
+        Presence on the expected target is not enough.  A live run attached
+        ``SideScrollerCamera`` to both Main Camera *and* Player; the camera copy
+        passed the required-component check while the Player copy followed its
+        own transform every LateUpdate and moved hundreds of units per second.
+
+        Only user scripts are considered.  Built-in components such as a
+        Collider can legitimately occur on several objects, and the request
+        does not assign those by class name as precisely as it assigns scripts.
+        """
+        misplaced: list[tuple[str, str, str]] = []
+        for expected, required in self.spec.required_components.items():
+            scripts = [
+                component for component in required
+                if component.lower().split(".")[-1] not in (
+                    self._BUILTIN_COMPONENTS | {"collider", "renderer"}
+                )
+            ]
+            for actual, observed in self.observed_components.items():
+                if actual == expected:
+                    continue
+                for component in scripts:
+                    if self._has_component(observed, component):
+                        misplaced.append((actual, component, expected))
+        return misplaced
+
     def created_objects(self) -> list[str]:
         """Active root objects a new scene does not come with on its own."""
         return [
@@ -1798,6 +1826,10 @@ class VerificationContract:
             for component in required:
                 if not self._has_component(observed, component):
                     failed.append(f"component_missing:{target}:{component}")
+        failed.extend(
+            f"component_misplaced:{actual}:{component}:expected:{expected}"
+            for actual, component, expected in self.misplaced_required_components()
+        )
         if self.spec.require_player_constraints:
             player_data = self.observed_component_data.get("Player", {})
             rigidbody = next(
@@ -2232,6 +2264,9 @@ def failure_check_name(failure: str) -> str | None:
     if failure.startswith("component_missing:"):
         parts = failure.split(":")
         return f"components:{parts[1]}" if len(parts) > 2 else None
+    if failure.startswith("component_misplaced:"):
+        parts = failure.split(":")
+        return f"components:{parts[4]}" if len(parts) > 4 else None
     for prefix, name in _FAILURE_CHECK_PREFIXES:
         if failure.startswith(prefix):
             return name
@@ -2254,6 +2289,18 @@ def fix_prompt(spec: VerificationSpec, failures: list[str], evidence: dict) -> s
     )
     lint_guidance = []
     for failure in failures:
+        if "component_misplaced:" in failure:
+            detail = failure.split("component_misplaced:", 1)[1].split(":")
+            if len(detail) >= 4 and detail[2] == "expected":
+                actual, component, expected = detail[0], detail[1], detail[3]
+                lint_guidance.append(
+                    f"- component_misplaced: `{component}`가 `{actual}`에 잘못 붙어 있고 "
+                    f"요청상 올바른 대상은 `{expected}`이다. Play Mode를 멈춘 뒤 "
+                    f"unity_remove_component(target=\"{actual}\", "
+                    f"component_type=\"{component}\", remove_all=true)로 **잘못된 "
+                    f"대상의 복사본만 제거**한다. `{expected}`에 붙은 같은 컴포넌트는 "
+                    "유지하고, 오브젝트를 삭제하거나 다시 만들지 마라."
+                )
         if "undefined_compare_tag:" in failure:
             # 실패 문자열은 `policy_lint:undefined_compare_tag:<경로>:<태그>` 형태로
             # 오지만, lint가 직접 낸 목록에는 접두사가 없다. 양쪽을 다 받는다.
