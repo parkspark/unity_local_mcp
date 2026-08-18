@@ -70,6 +70,19 @@ uv run main.py --project "D:\UnityProjects\MyGame" --prompt-file docs\request.tx
 uv run main.py --project "D:\UnityProjects\MyGame" --prompt-file docs\request.txt --repair-existing
 ```
 
+### Windows EXE
+
+`dist\UnityLocalAgent.exe`를 더블클릭하면 터미널 명령 없이 대화형 에이전트를 시작할 수
+있다. 최근 사용한 Unity 프로젝트는 EXE 옆의 `.unity-local-agent.json`에 저장되고,
+실행 로그도 EXE 옆 `logs\`에 생성된다. Ollama와 외부 `unity_mcp` 폴더는 기존처럼
+필요하다.
+
+EXE를 다시 빌드하려면 PowerShell에서 다음을 실행한다.
+
+```powershell
+.\build_exe.ps1
+```
+
 ### 새 Unity 프로젝트 빠른 시작
 
 1. Unity Hub에서 새 프로젝트를 만들고 열어 둡니다.

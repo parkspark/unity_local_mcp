@@ -2,6 +2,7 @@
 
 import os
 
+from runtime_paths import app_dir
 from version import __version__
 
 # Ollama
@@ -98,7 +99,7 @@ FOCUS_UNITY_ON_INPUT = os.environ.get("UNITY_AGENT_FOCUS_INPUT", "1") != "0"
 RUN_LOGS = os.environ.get("UNITY_AGENT_RUN_LOGS", "1") != "0"
 RUN_LOG_DIR = os.path.abspath(os.environ.get(
     "UNITY_AGENT_RUN_LOG_DIR",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "runs"),
+    str(app_dir() / "logs" / "runs"),
 ))
 
 # ---- v1.8.1: MCP 감사 로그 / 검증 전용 모드 ----
@@ -107,7 +108,7 @@ RUN_LOG_DIR = os.path.abspath(os.environ.get(
 MCP_AUDIT_LOGS = os.environ.get("UNITY_MCP_AUDIT_LOGS", "1") != "0"
 MCP_AUDIT_LOG_DIR = os.path.abspath(os.environ.get(
     "UNITY_MCP_AUDIT_LOG_DIR",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "mcp"),
+    str(app_dir() / "logs" / "mcp"),
 ))
 
 # full: 모든 도구, verify: 조회·플레이·입력·스크린샷 도구만 노출/허용.
@@ -129,7 +130,7 @@ NO_PROGRESS_LIMIT = int(os.environ.get("UNITY_AGENT_NO_PROGRESS_LIMIT", "2"))
 REPAIR_ROLLBACK = os.environ.get("UNITY_AGENT_REPAIR_ROLLBACK", "1") != "0"
 VERIFICATION_RECEIPT_DIR = os.path.abspath(os.environ.get(
     "UNITY_AGENT_RECEIPT_DIR",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "receipts"),
+    str(app_dir() / "logs" / "receipts"),
 ))
 
 # ---- v1.10: deterministic preflight / recovery ----

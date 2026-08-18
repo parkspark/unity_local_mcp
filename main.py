@@ -398,4 +398,9 @@ if __name__ == "__main__":
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     if hasattr(sys.stdin, "reconfigure"):
         sys.stdin.reconfigure(encoding="utf-8", errors="replace")
-    sys.exit(asyncio.run(main()))
+    try:
+        exit_code = asyncio.run(main())
+    except KeyboardInterrupt:
+        console.print("\n[dim]종료합니다.[/dim]")
+        exit_code = 130
+    sys.exit(exit_code)

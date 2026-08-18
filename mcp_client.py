@@ -12,12 +12,13 @@ import shutil
 import time
 from contextlib import AsyncExitStack
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp.client.session import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
 
 import config
 import local_tools
 from audit_logging import ToolAuditLogger
+from runtime_paths import app_dir
 
 
 _CS_FLOAT_SUFFIX = re.compile(r"(?<=[\d.])[fF]\b")
@@ -249,7 +250,7 @@ class UnityTools:
         # 서버 stderr("Processing request..." 로그)가 채팅 화면에 섞이지 않게 파일로
         errlog = self._stack.enter_context(
             open(
-                os.path.join(os.path.dirname(__file__), "mcp_server.log"),
+                str(app_dir() / "mcp_server.log"),
                 "a", encoding="utf-8", buffering=1,
             )
         )

@@ -8,8 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
+from runtime_paths import app_dir
 
-SETTINGS_PATH = Path(__file__).with_name(".unity-local-agent.json")
+
+SETTINGS_PATH = app_dir() / ".unity-local-agent.json"
 
 
 @dataclass(frozen=True)

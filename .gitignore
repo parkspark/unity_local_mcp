@@ -4,6 +4,8 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+build/
+dist/
 
 # 실행 산출물 — 요청 원문과 생성 코드가 포함될 수 있어 추적하지 않는다
 *.log

@@ -8,6 +8,8 @@ import json
 import os
 import re
 
+from runtime_paths import resource_dir
+
 NAMES = {
     "unity_write_script", "unity_read_script", "unity_delete_script", "unity_wait",
     "unity_write_level", "unity_read_level", "unity_install_level_loader",
@@ -20,7 +22,7 @@ _PROTECTED_PREFIX = "Assets/Editor/McpBridge/"
 # 레벨 수정 후 refresh 없이 바로 플레이 검증이 가능하다.
 LEVELS_PREFIX = "Assets/StreamingAssets/Levels/"
 # 호스트 저장소의 canonical LevelLoader 템플릿과 설치 위치
-_TEMPLATE_LOADER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates", "LevelLoader.cs")
+_TEMPLATE_LOADER = str(resource_dir() / "templates" / "LevelLoader.cs")
 LOADER_SCRIPT_PATH = "Assets/Scripts/LevelLoader.cs"
 
 # Unity 6에서 개명된 구식 API. 그대로 두면 API Updater가 에디터를 막는
