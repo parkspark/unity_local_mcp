@@ -10,7 +10,7 @@ MODEL = os.environ.get("UNITY_AGENT_MODEL", "qwen3.8:27b-mtp-q4_K_M")
 # qwen2.5vl:32b is installed on the target workstation. Keep this overrideable
 # for smaller machines, but do not default to a model that is absent locally.
 VISION_MODEL = os.environ.get("UNITY_AGENT_VISION_MODEL", "qwen2.5vl:32b")
-NUM_CTX = int(os.environ.get("UNITY_AGENT_NUM_CTX", "65536"))
+NUM_CTX = int(os.environ.get("UNITY_AGENT_NUM_CTX", "131072"))
 TEMPERATURE = float(os.environ.get("UNITY_AGENT_TEMPERATURE", "0.2"))
 REASONING_EFFORT = os.environ.get("UNITY_AGENT_REASONING_EFFORT", "medium").lower()
 if REASONING_EFFORT not in {"low", "medium", "high", "off"}:

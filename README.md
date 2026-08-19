@@ -123,7 +123,7 @@ EXE를 다시 빌드하려면 PowerShell에서 다음을 실행한다.
 사용 중인 포트(8722, 8723 등)를 따라갑니다.
 
 ```
-연결됨: 28 tools · qwen3.8:27b-mtp-q4_K_M · ctx 65536
+연결됨: 28 tools · qwen3.8:27b-mtp-q4_K_M · ctx 131072
 Unity 6000.5.2f1 · My project
 
 you> 바닥 평면 만들고 그 위에 빨간 큐브 3개를 x축으로 2씩 띄워 배치해줘
@@ -172,7 +172,7 @@ MCP 서버의 21개 도구(`unity_send_key` 포함) 외에, 호스트가 직접 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
 | `UNITY_AGENT_MODEL` | `qwen3.8:27b-mtp-q4_K_M` | 사용할 Ollama 모델 |
-| `UNITY_AGENT_NUM_CTX` | `65536` | 컨텍스트 길이. RTX 5090 32GB 기준 기본값; VRAM 부족 시 32768로 |
+| `UNITY_AGENT_NUM_CTX` | `131072` | 컨텍스트 길이(128K). RTX 5090 32GB 기준 기본값; VRAM 부족 시 65536 또는 32768로 |
 | `UNITY_AGENT_REASONING_EFFORT` | `medium` | 추론 노력: `low` / `medium` / `high` / `off` |
 | `UNITY_AGENT_MTP_DRAFT_TOKENS` | `4` | MTP 모델의 초안 토큰 수. `0`이면 비활성화 |
 | `UNITY_AGENT_MAX_ITERS` | `30` | 한 턴의 최대 도구 호출 반복 |
