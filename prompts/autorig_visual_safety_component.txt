@@ -1,0 +1,14 @@
+Polish the existing Assets/Scenes/AutoRigWASD.unity without reading or rewriting Assets/Scripts/AutoRigWASDController.cs.
+
+Create a new small component at Assets/Scripts/AutoRigVisualSafety.cs and attach it once to Player. It must be independent of the existing controller and do only these jobs:
+- Cache Player's initial position and rotation plus its Rigidbody in Awake.
+- In a Start coroutine, wait until the existing controller has instantiated a child named AutoRigModel. Find all Renderer components under that child, combine their world bounds, uniformly scale only AutoRigModel until the combined rendered height is approximately 2.0 world units, recalculate bounds, and shift only AutoRigModel vertically until its rendered bottom is at world Y=0. Log original height, final height, and applied scale. Do not scale Player.
+- In FixedUpdate, if Player is below world Y=-5, restore the cached position and rotation and zero Rigidbody.linearVelocity and angularVelocity.
+
+Also perform these scene edits:
+- Set Ground scale exactly to (200, 1, 200); keep its collider enabled and non-trigger.
+- On the existing AutoRigWASDController component set cameraOffset to (0, 1.8, -4.5). Do not rewrite that controller.
+- Delete the temporary scripts Assets/Scripts/TempDumpScript.cs and Assets/Scripts/TempDumpOutput.cs if they exist.
+- Preserve the assigned FBX and existing control/rig pose behavior.
+
+Refresh and compile with zero errors, save the scene, run Play Mode, confirm the valid Humanoid startup log, the visual-safety scale log, stable ground contact, and no exceptions. Overwrite Assets/Screenshots/AutoRigWASD.png with a Game view image showing the full armored humanoid at a clearly inspectable size. Stop Play Mode and leave the scene saved and active.

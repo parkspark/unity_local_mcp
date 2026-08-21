@@ -1,0 +1,14 @@
+Perform a minimal edit-mode model preview setup for Assets/Scenes/AutoRigWASD.unity. Do not read or rewrite AutoRigWASDController.cs.
+
+Use the existing asset Assets/AutoRigTest/melting_knight_tpose_humanoid.fbx to create one scene instance named EditModePreview as a child of Player. Make it visibly aligned with the existing runtime character: local position (0,0,0), local rotation (0,0,0), local scale (1,1,1). It must be enabled and visible while Play Mode is stopped. Do not add colliders or Rigidbody components to it.
+
+Create the following short new script Assets/Scripts/EditModePreviewHider.cs and attach it only to EditModePreview:
+using UnityEngine;
+public class EditModePreviewHider : MonoBehaviour
+{
+    private void Awake() { gameObject.SetActive(false); }
+}
+
+This script makes the preview disappear at runtime before the existing Player controller instantiates AutoRigModel; exiting Play Mode restores the saved enabled preview.
+
+Save the scene, verify the EditModePreview child exists and is active in edit mode, enter Play Mode and confirm the preview becomes inactive without errors, stop Play Mode, then capture the Scene view to Assets/Screenshots/AutoRigEditModePreview.png. End stopped.

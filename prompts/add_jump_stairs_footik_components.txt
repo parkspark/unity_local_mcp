@@ -1,0 +1,7 @@
+Implement this as independent components; do NOT read or rewrite AutoRigWASDController.cs.
+
+In Assets/Scenes/AutoRigWASD.unity:
+1. Create Assets/Scripts/JumpController.cs and attach to Player. It uses Keyboard.current.spaceKey.wasPressedThisFrame and Player Rigidbody. Grounded check with Physics.Raycast from capsule centre/down. On grounded Space, set vertical velocity or AddForce for a 1.5–2.5 unit jump; no double jump; log [Jump] Triggered. Do not change horizontal velocity.
+2. Create a Stairs root with 6 named child cube steps (BoxCollider, no Rigidbody), at x=5, z=4 onward. Use 0.35 unit rise, 0.7 unit tread depth, 3 unit width. Make them climbable by Player.
+3. Create Assets/Scripts/FootIKController.cs and attach to Player. It waits until runtime AutoRigModel Animator exists, then maps actual HumanBodyBones.LeftFoot and RightFoot. In LateUpdate raycast downward from each foot. Independently adjust foot local/world vertical position with smooth interpolation toward raycast contact height plus a small sole offset; optionally align to hit normal. Cache/restores feet position and rotation. It must never move Ground/Stairs/root. Log [FootIK] mappings and, when standing over stairs, two contact heights.
+4. Save, compile no errors. Play test: Space jumps and lands; W/D reach Stairs; capture Assets/Screenshots/AutoRigStairsFootIK.png while two feet are at different stair heights; no errors; stop Play Mode.

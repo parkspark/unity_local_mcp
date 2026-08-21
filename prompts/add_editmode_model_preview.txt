@@ -1,0 +1,10 @@
+Modify the existing Unity scene Assets/Scenes/AutoRigWASD.unity so the humanoid model is visibly present in the Scene view even while Play Mode is stopped.
+
+Implement this without breaking the existing Play Mode character, WASD controller, ground, camera, or procedural walk:
+1. Add a clearly named edit-mode preview object (for example Player/EditModePreview) that uses the same humanoid FBX/model as the Player runtime model, is positioned and scaled so its feet rest on the Ground surface, and is visible in Scene view while not playing.
+2. Prevent duplicate characters during Play Mode. The preview object must automatically be disabled in play mode before the existing controller creates/uses its runtime model. It must remain enabled in the saved edit-mode scene after Play Mode stops.
+3. The preview should not have Rigidbody/collider components that affect gameplay.
+4. Save the scene and verify: in edit mode Player has a visible model child; in Play Mode only one visible character appears; no console errors; after stopping, the preview remains present in edit mode.
+5. Take an editor Scene view screenshot to Assets/Screenshots/AutoRigEditModePreview.png (not a Game screenshot) that visibly shows the character and Ground.
+
+Use only existing project assets, preserve cameraTarget=Main Camera, and end with Play Mode stopped.

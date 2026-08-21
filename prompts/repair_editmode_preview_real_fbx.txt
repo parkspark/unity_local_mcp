@@ -1,0 +1,14 @@
+Repair the existing edit-mode preview in Assets/Scenes/AutoRigWASD.unity. The current Player/EditModePreview object is empty and its Scene screenshot contains no character. Do not change AutoRigWASDController.cs.
+
+Delete Assets/Scripts/TempAssignPreviewMesh.cs and remove MeshFilter/MeshRenderer from Player/EditModePreview if they are empty. Keep Player/EditModePreview and its EditModePreviewHider.
+
+Create Assets/Scripts/EditModeModelPreview.cs with this exact behaviour:
+- [ExecuteAlways] component with public GameObject modelPrefab and a serialized GameObject previewInstance.
+- In edit mode (not Application.isPlaying), ensure previewInstance is a real instantiated child of this object from modelPrefab, using UnityEditor.PrefabUtility.InstantiatePrefab. Name it PreviewModel. Set its local position/rotation/scale to zero/identity/one and active true.
+- In play mode, hide previewInstance. Do not destroy it in edit mode.
+- Use #if UNITY_EDITOR around UnityEditor usage and OnValidate/OnEnable to refresh safely. Mark the scene dirty after a preview is created so it persists.
+- Do not add Rigidbody or colliders to this preview.
+
+Attach EditModeModelPreview to Player/EditModePreview and set its modelPrefab reference to Assets/AutoRigTest/melting_knight_tpose_humanoid.fbx. This must instantiate a REAL visible humanoid hierarchy as Player/EditModePreview/PreviewModel in edit mode.
+
+Save the scene, verify the hierarchy includes PreviewModel with renderers and it is active in edit mode, capture a Scene view screenshot to Assets/Screenshots/AutoRigEditModePreview.png showing the model and Ground. Then enter Play Mode: PreviewModel/root preview must be inactive while the existing runtime AutoRigModel is used; no errors. Stop Play Mode, verify PreviewModel is active again in edit mode, save. Do not finish unless the edit-mode screenshot visibly contains the character.

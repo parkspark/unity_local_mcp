@@ -1,0 +1,7 @@
+Repair the existing QClapController.cs in Assets/Scenes/AutoRigWASD.unity. Q currently makes the character clap behind its waist. Make the clap happen visibly in FRONT of the chest.
+
+Do not change Q input, clap duration, Player movement, jump, stairs, camera, or other scripts.
+
+Use the actual runtime humanoid rig orientation to choose axes/signs, not fixed Euler assumptions that are incorrect for this FBX. Cache rest rotations. For LeftUpperArm/RightUpperArm and lower arms, derive a front-facing pose so both hands travel toward the model's chest-front centre (model transform.forward direction), and mirror left/right inward motion. Retain the cyclic two-contact pulse and restore rest pose. Hands are optional but should be oriented inward if mapped.
+
+Verification: Play, press Q, capture Assets/Screenshots/AutoRigClapFront.png at the contact phase. Inspect Game screenshot: both hands/forearms must be in front of torso, not behind hips/back. Confirm [QClap] Clap triggered and no errors. Stop Play Mode and save scene.

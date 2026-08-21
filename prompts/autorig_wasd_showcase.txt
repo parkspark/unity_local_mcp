@@ -1,0 +1,31 @@
+Create a complete playable humanoid rig showcase in the currently open Unity project at exactly Assets/Scenes/AutoRigWASD.unity. Use the existing model asset exactly Assets/AutoRigTest/melting_knight_tpose_humanoid.fbx. Do not create a substitute primitive as the visible character.
+
+Required scene and objects:
+- Create the scene with the basic template and dirty_policy backup so any currently dirty scene is preserved.
+- A root GameObject named Player at approximately (0, 1.1, 0), tagged Player if the available tools support it. It must have a CapsuleCollider, Rigidbody, a custom movement/rig animation component, and a MeshRenderer component directly on the Player root to satisfy the host visibility probe. The root MeshRenderer may have no mesh because the FBX child remains the only visible character.
+- A large visible ground platform named Ground, a Cube centered at (0, -0.5, 0) with scale (200, 1, 200). It must have a non-trigger collider so the Player cannot fall forever even during a long held-key test.
+- A Main Camera that follows from a useful third-person offset and looks at Player.
+- Keep or configure a Directional Light so the armor is readable.
+
+Write Assets/Scripts/AutoRigWASDController.cs using UnityEngine.InputSystem Keyboard.current, never the legacy UnityEngine.Input API. The component must:
+- expose a public GameObject modelPrefab field, instantiate that exact FBX once as a child of Player in Awake or Start, and keep its local position/rotation/scale suitable for standing on the platform;
+- obtain the child Animator and verify it has a valid Humanoid avatar;
+- move Player on the XZ plane with W/A/S/D at about 3.5 units per second, using Rigidbody physics safely and turning the character toward movement direction;
+- prevent uncontrolled rotation and preserve gravity/ground collision;
+- cache the spawn position and if Player ever goes below Y=-5, immediately reset position and velocity to the spawn point as a second fail-safe against infinite falling;
+- in LateUpdate, visibly animate the actual Humanoid rig while moving by using Animator.GetBoneTransform for left/right upper legs, lower legs, upper arms, and optionally chest. Cache each original local rotation and apply a smooth procedural walk cycle with opposite arm/leg swing. When idle, smoothly return toward the rest pose with a subtle breathing motion. Do not animate by only moving the whole mesh;
+- keep the third-person camera following smoothly without moving so close that the character cannot be observed;
+- log one clear startup message confirming whether the Humanoid avatar and required limb bones were found.
+
+After compiling, attach the script to Player and assign its modelPrefab field to Assets/AutoRigTest/melting_knight_tpose_humanoid.fbx using the component property tool. Configure Rigidbody mass and constraints as appropriate. Save the scene.
+
+Verification is mandatory:
+1. Confirm there are no compiler errors.
+2. Enter Play Mode and confirm Player remains above the Ground instead of falling indefinitely.
+3. Use unity_send_key with W, A, S, and D and measure Player position before/after to prove WASD movement.
+4. Confirm the instantiated model has Animator, SkinnedMeshRenderer, valid Humanoid avatar, and actual humanoid limb bones.
+5. Check the Console for runtime exceptions.
+6. Capture a Game view screenshot to Assets/Screenshots/AutoRigWASD.png while the character and platform are visible.
+7. Stop Play Mode and leave Assets/Scenes/AutoRigWASD.unity saved and active.
+
+Do not finish after merely writing scripts. Build the scene, wire all references, run the movement test, and repair any failures until the host verification passes.

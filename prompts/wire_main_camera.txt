@@ -1,0 +1,8 @@
+Open Assets/Scenes/AutoRigWASD.unity and perform only these editor operations:
+1. On Player, set the serialized AutoRigWASDController.cameraTarget object reference to the root scene object Main Camera (not Player).
+2. Remove BoneDump from Player if present.
+3. Delete any root object named TempScriptDumper or TempDumper if present.
+4. Delete Assets/Scripts/BoneDump.cs, Assets/Scripts/TempScriptDumper.cs, Assets/Scripts/TempDumpedScript.cs, and Assets/Scripts/TempDumpedScript.txt if present.
+5. Refresh assets and save Assets/Scenes/AutoRigWASD.unity. End with Play Mode stopped.
+
+Do not rewrite AutoRigWASDController.cs. Do not enter Play Mode. This is a narrowly scoped scene wiring and cleanup task.

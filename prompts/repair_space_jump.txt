@@ -1,0 +1,5 @@
+Fix the actual Space-key jump in Assets/Scenes/AutoRigWASD.unity. Work only on JumpController and Player; do not modify WASD, QClap, Stairs, or FootIK.
+
+Ensure Assets/Scripts/JumpController.cs compiles and Player has an enabled JumpController component. It must use Keyboard.current.spaceKey.isPressed with rising-edge latch (jumpHeld/jumpRequested) in Update and consume the request in FixedUpdate. It must calculate a reliable grounded state with a downward Physics.Raycast/CapsuleCollider check against Ground or Stairs, and on a grounded Space press set Rigidbody.linearVelocity.y to a jump speed around 5.5 while preserving X/Z. No double jump while airborne. Log [Jump] Triggered.
+
+Play Mode verification: wait until Player rests at ground, record Y; press Space for a short tap; query Player several times to confirm Y rises by at least 1 unit and then returns near the platform; while airborne press Space again and prove no second rise. Confirm no errors/exceptions, release Space, stop Play Mode, save scene. Do not leave Play Mode on.

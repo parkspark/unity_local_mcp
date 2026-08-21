@@ -1,0 +1,17 @@
+Extend the existing Unity scene Assets/Scenes/AutoRigWASD.unity so pressing Q triggers a visible procedural clap animation. Preserve the working WASD movement, third-person camera, edit-mode PreviewModel, Ground, and walk cycle.
+
+Implement the clap in Assets/Scripts/AutoRigWASDController.cs using actual Humanoid bones, not only moving a root or logging input:
+- Detect Keyboard.current.qKey.wasPressedThisFrame.
+- Trigger a one-shot clap lasting about 0.8 seconds. Repeated Q presses should restart the clap.
+- During the clap, use Animator.GetBoneTransform for LeftUpperArm, RightUpperArm, LeftLowerArm, RightLowerArm, LeftHand and RightHand (where mapped). Move arms forward/inward toward the chest centre, bend forearms, and drive hands together then apart at least twice so it reads as clapping.
+- Apply it in LateUpdate after walk pose logic, so clap visibly overrides upper-body walk-arm swinging while it is active. Legs/hips and WASD movement can continue.
+- Cache and restore all added bone rest rotations. If hand mappings are absent, arms/forearms must still clap cleanly.
+- Add a concise runtime log when Q starts: [AutoRigWASD] Clap triggered; and a diagnostic that identifies mapped clap bones.
+
+Verification:
+1. In Play Mode, settle Player on Ground, press Q once, wait 0.25 seconds, capture Assets/Screenshots/AutoRigClap.png while the clap is visible.
+2. Confirm Console contains "Clap triggered", no errors/exceptions, and runtime diagnostic shows mapped arm/forearm bones (hands when available).
+3. Test holding W then pressing Q: Player continues moving on Ground and arms use clap pose rather than normal alternating walk-arm swing.
+4. Release keys and stop Play Mode. Save the scene.
+
+Do not create temporary scripts or duplicate character objects. End with Play Mode stopped.

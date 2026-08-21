@@ -1,0 +1,12 @@
+Implement Q clap as a new, independent component to avoid modifying the existing AutoRigWASDController.cs.
+
+Create Assets/Scripts/QClapController.cs and attach it to Player in Assets/Scenes/AutoRigWASD.unity. The script must:
+- In Start, find the Animator in Player's runtime AutoRigModel child (retry until found); use actual Animator.GetBoneTransform Humanoid bones.
+- Cache rest local rotations for LeftUpperArm, RightUpperArm, LeftLowerArm, RightLowerArm, LeftHand, RightHand when non-null.
+- Detect Keyboard.current.qKey.wasPressedThisFrame and start/restart a 0.9-second clap while logging "[QClap] Clap triggered".
+- In LateUpdate while active, apply a procedural cyclic clap to actual upper arm/forearm/hand transforms: arms angle forward/inward, forearms bend, and hands move together/apart twice using a sinusoidal pulse. It must visibly override the arm part of the walk cycle. Lower-body movement remains controlled by AutoRigWASDController.
+- Smoothly restore arm bones to rest after completion. Must gracefully work without hand bones.
+
+Do not add Rigidbody/collider. Preserve all existing scripts and edit-mode preview.
+
+Compile, save, Play Mode test: press Q, capture Assets/Screenshots/AutoRigClap.png during the clap, confirm console log and no errors, stop Play Mode.

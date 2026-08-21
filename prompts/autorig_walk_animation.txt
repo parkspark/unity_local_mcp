@@ -1,0 +1,26 @@
+Improve the existing playable scene Assets/Scenes/AutoRigWASD.unity so the existing rigged knight has a clearly visible procedural walk animation whenever it moves with W/A/S/D. Do not recreate the scene, replace the FBX, or remove the existing ground/camera/fall-safety setup.
+
+Modify only Assets/Scripts/AutoRigWASDController.cs as needed. Continue using UnityEngine.InputSystem Keyboard.current and Rigidbody movement. The visible animation must manipulate the actual Humanoid skeleton obtained from the instantiated model's Animator.GetBoneTransform, not merely rotate or bob the Player root or whole mesh.
+
+Walk animation requirements:
+- Cache the rest local rotations of LeftUpperLeg, RightUpperLeg, LeftLowerLeg, RightLowerLeg, LeftUpperArm, RightUpperArm, LeftLowerArm, RightLowerArm, and Hips after confirming Animator.isHuman.
+- Apply the procedural pose in LateUpdate so it wins after Animator evaluation.
+- Use a natural alternating gait: left leg forward while right leg moves back, and right arm forward while left arm moves back; reverse on the next half-cycle.
+- Rotate upper arms and upper legs in the character's sagittal forward/back plane using the correct local bend axis for this imported humanoid. Do not use a sideways/cartwheel swing. Determine or validate the usable axis from the imported rig and make the visual motion obvious but not extreme.
+- Bend each knee only during the leg's backward/swing phase using a non-negative bend curve, and add a smaller elbow bend.
+- Add subtle Hips vertical bob and side-to-side weight shift by changing the Hips local position relative to its cached rest position. Never move the Player root for the bob.
+- Blend smoothly from rest to walk when movement starts and back to rest when movement stops. At idle, all cached bones and Hips position must return close to the rest pose, retaining only a very subtle breathing motion if desired.
+- Drive animation speed from horizontal Rigidbody speed so it stops when the character is not actually moving. Keep diagonal speed normalized around the existing 3.5 units/second.
+- Preserve facing toward movement direction, third-person camera following, valid Humanoid checks, modelPrefab assignment, ground collision, and AutoRigVisualSafety.
+- Add a concise runtime diagnostic log once per play session that reports valid Humanoid status, all required walk bones found, selected bend axis, and observed maximum walk bone angular delta after movement begins. Do not spam every frame.
+
+Verification is mandatory:
+1. Compile with zero errors and save Assets/Scenes/AutoRigWASD.unity.
+2. Enter Play Mode, wait for Player to settle on Ground, and record rest local rotations for at least LeftUpperLeg, RightUpperLeg, LeftUpperArm, and RightUpperArm using hierarchy/gameobject inspection.
+3. Hold W or D for about 0.7 seconds, inspect those exact bone transforms while the key remains held, then release the key. Prove that opposing limbs changed rotation in opposite walk phases and Player position also changed.
+4. After release, wait and confirm bone rotations blend back near their cached rest rotations.
+5. Test at least W, A, S, and D movement without falling, and confirm no runtime exceptions.
+6. Capture Assets/Screenshots/AutoRigWalk.png during movement, with the full character large enough to inspect and visibly out of the T-pose/rest pose.
+7. Stop Play Mode and leave the scene saved and active.
+
+Do not claim success based only on Player position. Actual humanoid bone rotation changes during movement are required evidence.

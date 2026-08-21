@@ -1,0 +1,12 @@
+Verify the existing Assets/Scenes/AutoRigWASD.unity implementation. Do not rebuild it.
+
+Required runtime checks:
+- Enter Play Mode with no key held, wait 2 seconds, and query Player twice 0.5 seconds apart. Confirm it stays on the platform near its initial height and does not move horizontally.
+- Record Player start position, hold W for 1.2 seconds using Unity keyboard input, query Player while W is held, then release W. Confirm meaningful horizontal displacement with bounded Y and no falling/flying.
+- While W is held, inspect the controller runtime diagnostic and confirm maxWalkBoneDelta is non-zero. Confirm the code animates Left/Right UpperLeg, LowerLeg, UpperArm, LowerArm plus Hips using Animator.GetBoneTransform and LateUpdate.
+- Capture Assets/Screenshots/AutoRigWalk.png while W is still held and the character is visibly in a walking stride.
+- Confirm Main Camera follows at an observable third-person distance and Ground remains at y=-0.5.
+- Read error/exception console entries. There must be none.
+- Release all keys and stop Play Mode at the end.
+
+Only make a repair if one of these checks fails. Preserve the existing scene and procedural walk code.

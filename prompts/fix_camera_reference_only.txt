@@ -1,0 +1,5 @@
+Open Assets/Scenes/AutoRigWASD.unity. Fix the existing Player so AutoRigWASDController.cameraTarget references the root scene object Main Camera, never Player. Harden Assets/Scripts/AutoRigWASDController.cs by adding a camera resolver that returns Camera.main.transform whenever cameraTarget is null or cameraTarget == transform, and use that resolved camera for both camera following and camera-relative movement. Never assign or move the Player transform as the camera. Preserve the existing procedural Humanoid walking code.
+
+Remove BoneDump from Player and delete Assets/Scripts/BoneDump.cs plus any TempScriptDumper diagnostic object/script. Save the scene.
+
+Then test: with no key held for 2 seconds Player must stay near its start on the ground; hold W for 1 second and confirm horizontal displacement while the procedural walk reports non-zero maxWalkBoneDelta; release W; take Assets/Screenshots/AutoRigWalk.png during a visible walking stride; stop Play Mode; ensure no errors.

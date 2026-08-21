@@ -1,0 +1,16 @@
+Repair the existing Unity scene Assets/Scenes/AutoRigWASD.unity and its existing procedural walk implementation. Do not rebuild the scene from scratch.
+
+Known root cause: Player's AutoRigWASDController.cameraTarget is currently serialized to Player itself. The controller's Update moves cameraTarget every frame, so it moves the Player upward/backward even with no input. Fix this decisively. Set that serialized reference to the scene object Main Camera, and also harden AutoRigWASDController so it never moves its own transform as a camera (resolve Camera.main when cameraTarget is null or cameraTarget == transform). Movement direction must use the same resolved camera.
+
+Keep the existing Humanoid procedural walk: speed-driven blend, alternating upper legs and opposite upper arms, knee and elbow bends, hips bob/shift, LateUpdate application to actual Animator Humanoid bone transforms. Improve only if needed.
+
+Remove the temporary BoneDump component from Player and delete Assets/Scripts/BoneDump.cs after diagnostics.
+
+Required verification, in this exact order:
+1. Stop Play Mode and save the scene. Confirm Player cameraTarget points to Main Camera.
+2. Enter Play Mode with no keys held. Wait at least 1.5 seconds. Query Player twice 0.5 seconds apart. It must remain on the ground near its starting Y (not rise or move backward), with no exception/error.
+3. Record starting Player position. Hold W for about 1 second. While W is still held, inspect Player position and capture Assets/Screenshots/AutoRigWalk.png so the character is visibly in a non-T-pose walking stride. Release W. Player must have moved horizontally while remaining on the platform.
+4. During the held-W interval, prove actual joint motion: query at least LeftUpperLeg, RightUpperLeg, LeftUpperArm, RightUpperArm bone transforms at two times, or use a persistent controller diagnostic that reports max angular delta from cached rest. Evidence must show non-zero alternating bone rotation. Also verify lower-leg/elbow bend code is active.
+5. Stop Play Mode, ensure no error/exception, save the scene.
+
+Do not accept host verification that merely checks component names. The essential checks are stable no-input Player transform, horizontal W displacement, and non-zero actual Humanoid bone rotation. If keyboard injection is unavailable, use the available Unity input tool. End with Play Mode stopped.

@@ -1,0 +1,12 @@
+This is an evidence-capture task for the already implemented Assets/Scenes/AutoRigWASD.unity. Do not edit scripts or scene objects.
+
+Use Unity tools to:
+1. Ensure Play Mode is stopped, then start Play Mode and wait until Player settles on the ground.
+2. Press and HOLD the W key. Do not release it yet.
+3. Wait about 0.55 seconds so the procedural gait reaches a visible stride.
+4. While W remains held, capture a Game view screenshot to Assets/Screenshots/AutoRigWalk.png.
+5. While W remains held, read the Console and report the newest [AutoRigWASD] Walk diagnostic including walkBlend and maxWalkBoneDelta. The delta must be greater than zero and actual mapped Humanoid bone names must be listed.
+6. Query Player position while W is held, wait another 0.25 seconds, query again, then release W. Confirm horizontal movement and bounded Y.
+7. Read error/exception console entries, release all held keys, and stop Play Mode.
+
+Do not create any temporary scripts or objects. Do not rewrite AutoRigWASDController.cs. The existing diagnostic already prints the required bone rotations.

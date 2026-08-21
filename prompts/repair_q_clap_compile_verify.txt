@@ -1,0 +1,9 @@
+Repair and finish the existing Q clap implementation in Assets/Scripts/QClapController.cs and Assets/Scenes/AutoRigWASD.unity.
+
+The exact compilation bug is that the script uses an invalid Humanoid or Humanoid.Bone enum. Replace EVERY Animator.GetBoneTransform argument in QClapController.cs with the correct Unity enum HumanBodyBones:
+HumanBodyBones.LeftUpperArm, HumanBodyBones.RightUpperArm, HumanBodyBones.LeftLowerArm, HumanBodyBones.RightLowerArm, HumanBodyBones.LeftHand, HumanBodyBones.RightHand.
+Do not use Humanoid, HumanoidBone, UnityEngine.Animations, or any other enum.
+
+Compile until error/exception console is empty. Attach QClapController to Player if not already attached, then save the scene.
+
+Runtime verification: Play, wait for Player to settle, press Q once, wait 0.25 seconds, capture Assets/Screenshots/AutoRigClap.png while the pose is active. Confirm Console contains [QClap] Clap triggered and no error/exception. Press W and Q together briefly to confirm Player moves horizontally while clap overrides arms. Release every key and stop Play Mode. Do not create temporary scripts/objects.

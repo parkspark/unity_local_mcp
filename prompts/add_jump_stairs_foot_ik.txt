@@ -1,0 +1,24 @@
+Extend Assets/Scenes/AutoRigWASD.unity with jump, climbable stairs, and natural foot-height adaptation. Preserve WASD, Q clap, procedural walk, camera, edit-mode preview, Ground, and fall safety.
+
+1. Jump:
+- Extend the existing Player movement/controller (or add a focused component) to detect Keyboard.current.spaceKey.wasPressedThisFrame.
+- Only jump while grounded (physics grounded check); apply a moderate Rigidbody upward velocity/impulse for a roughly 1.5–2.5 unit jump. Do not permit repeated airborne jumps.
+- Log a concise [AutoRigWASD] Jump triggered message.
+
+2. Stairs:
+- Create a clearly named Stairs root at a visible location in front/right of the Player. Build at least 6 solid BoxCollider steps, each about 0.3–0.4 high and 0.6–0.8 deep, with a broad enough width for Player. Ensure Player can walk up using W/D without clipping or falling through.
+- Use neutral materials/colors distinct from Ground. No Rigidbody on steps.
+
+3. Foot adaptation:
+- Add a focused foot IK/adaptation component to Player or extend the controller. It must use actual left/right foot Humanoid bone transforms and downward Physics.Raycast ground/stair detection; adjust each foot's vertical world/local position and foot rotation to align to the hit normal, with smoothing.
+- When a foot is over a higher stair than the other, its target must be independently higher. Smoothly restore to cached rest positions/rotations when no valid ground hit is found. Keep pelvis/root stable and do not move Ground/step transforms.
+- If Animator IK callbacks are not available because no Animator Controller is running, implement the late-update bone-transform approach directly; it must still use real Humanoid foot bones and raycasts.
+- Add a diagnostic [FootIK] log that confirms both feet mapped and reports independent hit heights while on Stairs.
+
+4. Verify:
+- Compile with no errors.
+- Play: test Space jump from Ground, prove upward rise and landing; test repeated Space while airborne does not give double jump.
+- Walk Player onto/up the Stairs using movement keys. Capture Assets/Screenshots/AutoRigStairsFootIK.png while standing/walking across different stair heights.
+- Confirm [FootIK] diagnostic has distinct left/right contact heights on steps, no errors/exceptions, all keys released, and Play Mode stopped.
+
+Do not remove the current QClapController or edit-mode PreviewModel. Save scene after edits.

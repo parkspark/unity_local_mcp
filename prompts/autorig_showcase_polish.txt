@@ -1,0 +1,11 @@
+Polish the existing playable rig showcase; do not recreate it. Open and keep exactly Assets/Scenes/AutoRigWASD.unity and update exactly Assets/Scripts/AutoRigWASDController.cs.
+
+Required changes:
+1. Modify Ground to scale exactly (200, 1, 200), keeping its BoxCollider enabled and non-trigger.
+2. In AutoRigWASDController, cache Player's spawn position. In FixedUpdate or Update, if transform.position.y < -5, reset Player to the spawn position, reset rotation to a safe upright rotation, and set Rigidbody.linearVelocity and angularVelocity to zero. Log a concise respawn message.
+3. Make the rig visually inspectable. After instantiating the assigned FBX, calculate combined child Renderer bounds and uniformly scale the model so its rendered height is approximately 2.0 Unity units. Then vertically offset the model so the bottom of its rendered bounds sits on the Ground top around world Y=0. Do this deterministically once at startup.
+4. Bring the third-person camera closer: use an offset around (0, 1.8, -4.5) and look near the character's chest. The complete character and nearby platform must fill a useful portion of the Game view.
+5. Preserve the existing Input System WASD movement, Rigidbody physics, valid Humanoid check, and actual humanoid limb procedural walk animation.
+6. Keep the MeshFilter and MeshRenderer components already added directly to Player for the host visibility probe; do not assign a substitute visible mesh to them.
+
+Compile with no errors, save the scene, enter Play Mode, verify Player settles on Ground, verify D and A movement, confirm the Humanoid startup log and no runtime exceptions, and capture exactly Assets/Screenshots/AutoRigWASD.png again. Inspect the screenshot via the available evidence and ensure the character is clearly larger and visible. Stop Play Mode and leave the scene saved and active.

@@ -1,0 +1,9 @@
+Update the existing scene Assets/Scenes/AutoRigWASD.unity and existing script Assets/Scripts/AutoRigWASDController.cs in place. Do not recreate the scene or replace the character. Preserve all existing control and humanoid pose behavior byte-for-byte where possible; this task only adds visual sizing and fall safety.
+
+- Set the existing Ground object's transform scale to exactly (200, 1, 200). Keep its collider enabled and non-trigger.
+- Add a cached spawn position and rotation to the existing controller. If the Player root goes below world Y=-5, restore the cached spawn position and upright cached rotation, and zero Rigidbody.linearVelocity and Rigidbody.angularVelocity. Log one concise recovery message.
+- Immediately after the FBX child is instantiated, calculate combined bounds of all child Renderer components. Uniformly scale the FBX child so its rendered height is approximately 2.0 world units, recalculate bounds, then shift only the FBX child vertically until the bottom of its rendered bounds sits at world Y=0. Do not change the Player physics scale.
+- Change the existing third-person camera offset default and serialized component value to approximately (0, 1.8, -4.5), looking near the humanoid chest, so the complete character is large enough to inspect.
+- Keep the existing empty MeshFilter and MeshRenderer on the Player root for the visibility probe; do not assign a primitive mesh.
+
+Compile, save the scene, run it, confirm the startup log reports a valid Humanoid and found limbs, confirm no runtime errors, and overwrite Assets/Screenshots/AutoRigWASD.png with a Game view capture where the full armored humanoid is clearly visible at a useful size. Stop Play Mode and leave the scene saved and active.
