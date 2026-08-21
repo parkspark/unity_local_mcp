@@ -2,6 +2,12 @@
 
 # 시연
 
+### 모델링 명령 시연
+
+| 1차 명령 | 2차 명령 |
+| :---: | :---: |
+| ![백덤블링 1차명령](image/백덤블링%201차명령.gif) | ![백덤블링 2차 명령](image/백덤블링%202차%20명령.gif) |
+
 ### 🎬 v1.11.11 시연 영상
 [![v1.11.11 시연 영상](https://img.youtube.com/vi/HOmAOHZUyfQ/hqdefault.jpg)](https://www.youtube.com/watch?v=HOmAOHZUyfQ)
 
